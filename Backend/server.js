@@ -68,7 +68,7 @@ io.on('connection', (socket) => {
 const db = mysql.createPool({
   host: 'localhost',
   user: 'root',
-  password: '',
+  password: 'root123',
   database: 'fitaura_db'
 });
 
@@ -553,10 +553,22 @@ app.get('/api/products', (req, res) => {
   const params = [];
 
   if (admin !== 'true') sql += ' AND p.is_visible = 1 AND p.is_verified = 1';
+
   if (search) {
-    sql += ' AND (p.product_name LIKE ? OR p.description LIKE ? OR s.store_name LIKE ?)';
-    params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+      sql += ' AND (p.product_name LIKE ? OR p.description LIKE ? OR s.store_name LIKE ?)';
+      params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+
+      // Log search interaction
+      const { userId } = req.query;
+      if (userId) {
+          db.query(
+              'INSERT INTO user_interactions (user_id, interaction_type, search_query) VALUES (?, "search", ?)',
+              [userId, search],
+              () => {}
+          );
+      }
   }
+
   if (category && category !== 'All') { sql += ' AND p.category = ?'; params.push(category); }
   if (gender && gender !== 'All') { sql += ' AND LOWER(p.gender) = LOWER(?)'; params.push(gender); }
   if (minPrice) { sql += ' AND p.price >= ?'; params.push(parseFloat(minPrice)); }
