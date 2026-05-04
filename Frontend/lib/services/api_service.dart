@@ -753,4 +753,39 @@ class ApiService {
       return {'success': false, 'message': e.toString()};
     }
   }
+
+  /// Calls the Get recommendations API endpoint.
+  static Future<List<Map<String, dynamic>>> getRecommendations(int userId) async {
+    try {
+      final res = await http.get(
+        Uri.parse('http://127.0.0.1:8000/api/recommendations/$userId'),
+        headers: _headers,
+      );
+      if (_isOk(res.statusCode)) {
+        final data = jsonDecode(res.body);
+        return List<Map<String, dynamic>>.from(data['recommendations'] ?? []);
+      }
+      return [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  /// Calls the Get similar products API endpoint.
+  static Future<Map<String, dynamic>> getSimilarProducts({
+    required int productId,
+    int? userId,
+  }) async {
+    try {
+      final uri = Uri.parse('http://127.0.0.1:8000/api/similar/$productId'); // ← path param
+      final res = await http.get(uri, headers: _headers);
+      if (_isOk(res.statusCode)) {
+        final data = jsonDecode(res.body);
+        return {'success': true, 'data': data['similar'] ?? []};
+      }
+      return {'success': false, 'data': []};
+    } catch (e) {
+      return {'success': false, 'data': []};
+    }
+  }
 }

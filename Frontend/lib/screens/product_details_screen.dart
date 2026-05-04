@@ -51,6 +51,10 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
   List<dynamic> _reviews = [];
   bool _isLoadingReviews = true;
   double _averageRating = 0.0;
+  
+  ///============ For Recommender ==================///
+  List<dynamic> _similarProducts = [];
+  bool _isLoadingSimilar = false;
 
   @override
   void initState() {
@@ -62,6 +66,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
     _fetchVariants();
     _fetchStoreRating();
     _fetchReviews();
+    _fetchSimilarProducts();
   }
 
   Future<void> _fetchReviews() async {
@@ -154,6 +159,33 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
       if (mounted) setState(() => _isLoadingVariants = false);
     }
   }
+
+  Future<void> _fetchSimilarProducts() async {
+    final productIdVal = widget.product['id'] ?? widget.product['product_id'];
+    if (productIdVal == null) return;
+
+    final productId = productIdVal is int
+        ? productIdVal
+        : int.tryParse(productIdVal.toString()) ?? 0;
+
+    setState(() => _isLoadingSimilar = true);
+
+    try {
+      final result = await ApiService.getSimilarProducts(
+        productId: productId,
+        userId: widget.userId,
+      );
+      if (mounted) {
+        setState(() {
+          _similarProducts = result['success'] ? (result['data'] ?? []) : [];
+          _isLoadingSimilar = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) setState(() => _isLoadingSimilar = false);
+    }
+  }
+  
 
   List<String> _allSizes = [];
   List<String> _allColors = [];
@@ -862,6 +894,8 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                           ),
                           ProductDetailsStyles.sizedBoxHeight24,
                           _buildReviewsSection(),
+                          ProductDetailsStyles.sizedBoxHeight24,
+                          _buildSimilarProductsSection(), // For Recommender (Similar Products) //
                           ProductDetailsStyles.sizedBoxHeight70,
                         ],
                       ),
@@ -1676,4 +1710,139 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
       ],
     );
   }
+
+  Widget _buildSimilarProductsSection() {
+    if (_isLoadingSimilar) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 16),
+        child: Center(
+          child: CircularProgressIndicator(
+            color: ProductDetailsStyles.primaryColor,
+          ),
+        ),
+      );
+    }
+
+    if (_similarProducts.isEmpty) return const SizedBox.shrink();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Divider(height: 1, color: ProductDetailsStyles.dividerColor),
+        ProductDetailsStyles.sizedBoxHeight24,
+        const Text(
+          "Similar Products",
+          style: ProductDetailsStyles.sectionHeaderStyle,
+        ),
+        ProductDetailsStyles.sizedBoxHeight16,
+        SizedBox(
+          height: 220,
+          child: ListView.builder(
+            scrollDirection: Axis.horizontal,
+            itemCount: _similarProducts.length,
+            itemBuilder: (context, index) {
+              final product = _similarProducts[index];
+              final images = product['product_images'] as List? ?? [];
+              final imageUrl = images.isNotEmpty ? images[0].toString() : null;
+              final name = product['product_name'] ??
+                  product['name'] ??
+                  'Product';
+              final price = product['price']?.toString() ?? '0';
+
+              return GestureDetector(
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => ProductDetailsScreen(
+                        product: Map<String, dynamic>.from(product),
+                        userId: widget.userId,
+                      ),
+                    ),
+                  );
+                },
+                child: Container(
+                  width: 150,
+                  margin: const EdgeInsets.only(right: 12),
+                  decoration: BoxDecoration(
+                    color: ProductDetailsStyles.beigeBackgroundColor,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(
+                      color: ProductDetailsStyles.greyBorderColor
+                          .withOpacity(0.4),
+                    ),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // Product image
+                      ClipRRect(
+                        borderRadius: const BorderRadius.only(
+                          topLeft: Radius.circular(16),
+                          topRight: Radius.circular(16),
+                        ),
+                        child: SizedBox(
+                          height: 130,
+                          width: double.infinity,
+                          child: imageUrl == null
+                              ? const Icon(
+                                  Icons.image_not_supported,
+                                  color: ProductDetailsStyles.lightGrayColor,
+                                )
+                              : imageUrl.startsWith('http')
+                                  ? Image.network(
+                                      imageUrl,
+                                      fit: BoxFit.cover,
+                                      errorBuilder: (_, __, ___) => const Icon(
+                                        Icons.image_not_supported,
+                                        color:
+                                            ProductDetailsStyles.lightGrayColor,
+                                      ),
+                                    )
+                                  : Image.asset(
+                                      imageUrl,
+                                      fit: BoxFit.cover,
+                                    ),
+                        ),
+                      ),
+                      // Product info
+                      Padding(
+                        padding: const EdgeInsets.all(8),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              name,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: ProductDetailsStyles.darkTextColor,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              'Rs $price',
+                              style: const TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                                color: ProductDetailsStyles.primaryColor,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+        ProductDetailsStyles.sizedBoxHeight24,
+      ],
+    );
+  }
+
 }

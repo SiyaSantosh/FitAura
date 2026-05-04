@@ -585,20 +585,68 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
   }
 
   Widget _buildHomeTab() {
-    return SingleChildScrollView(
-      padding: CustomerHomeStyles.paddingH24,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _buildBanner(),
-          CustomerHomeStyles.sizedBoxHeight24,
-          _buildCategories(),
-          if (!kIsWeb) CustomerHomeStyles.sizedBoxHeight110,
-        ],
-      ),
-    );
-  }
+      return SingleChildScrollView(
+        padding: CustomerHomeStyles.paddingH24,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildBanner(),
+            CustomerHomeStyles.sizedBoxHeight24,
+            _buildCategories(),
+            CustomerHomeStyles.sizedBoxHeight24,
+            _buildRecommendations(),
+            if (!kIsWeb) CustomerHomeStyles.sizedBoxHeight110,
+          ],
+        ),
+      );
+    }
 
+    Widget _buildRecommendations() {
+      if (widget.userId == null) return const SizedBox();
+
+      return FutureBuilder<List<Map<String, dynamic>>>(
+        future: ApiService.getRecommendations(widget.userId!),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Center(
+              child: CircularProgressIndicator(
+                color: CustomerHomeStyles.primaryColor,
+              ),
+            );
+          }
+
+          final recommendations = snapshot.data ?? [];
+          if (recommendations.isEmpty) return const SizedBox();
+
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Recommended For You',
+                style: CustomerHomeStyles.sectionHeaderStyle,
+              ),
+              CustomerHomeStyles.sizedBoxHeight16,
+              SizedBox(
+                height: 220,
+                child: ListView.builder(
+                  scrollDirection: Axis.horizontal,
+                  itemCount: recommendations.length,
+                  itemBuilder: (context, index) {
+                    final product = recommendations[index];
+                    return Container(
+                      width: 150,
+                      margin: const EdgeInsets.only(right: 12),
+                      child: _buildProductCard(product),
+                    );
+                  },
+                ),
+              ),
+            ],
+          );
+        },
+      );
+    }
+    
   Widget _buildProductsTab() {
     if (_isSearchingOrFiltering) {
       return Column(
