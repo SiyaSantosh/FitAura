@@ -308,13 +308,14 @@ class ApiService {
 
   /// Calls the Get all products API endpoint.
   static Future<Map<String, dynamic>> getAllProducts({
-    String? search, String? category, String? gender, double? minPrice, double? maxPrice,
+    String? search, int? userId, String? category, String? gender, double? minPrice, double? maxPrice,
     String? sortBy, List<String>? sizes, List<String>? colors, String? brand, bool isAdmin = false,
   }) async {
     try {
       String url = '$baseUrl/api/products?';
       if (isAdmin) url += 'admin=true&';
       if (search != null) url += 'search=$search&';
+      if (search != null && userId != null) url += 'userId=$userId&';
       if (category != null && category != 'All') url += 'category=$category&';
       if (gender != null && gender != 'All') url += 'gender=$gender&';
       if (minPrice != null) url += 'minPrice=$minPrice&';

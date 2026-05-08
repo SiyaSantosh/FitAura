@@ -45,6 +45,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
   bool _isStoresLoading = false;
   final TextEditingController _searchController = TextEditingController();
   String _searchQuery = '';
+  int _recommendationKey = 0;
 
   String _selectedGender = 'All';
   String _selectedCategory = 'All';
@@ -130,6 +131,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
     try {
       final result = await ApiService.getAllProducts(
         search: _searchQuery,
+        userId: widget.userId,
         category: _selectedCategory,
         gender: _selectedGender,
         minPrice: _priceRange.start,
@@ -570,6 +572,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
                     onBackPressed: () {
                       setState(() {
                         _selectedIndex = 0; 
+                        _recommendationKey++;
                       });
                     },
                   ),
@@ -602,11 +605,11 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
     }
 
     Widget _buildRecommendations() {
-      if (widget.userId == null) return const SizedBox();
+        if (widget.userId == null) return const SizedBox();
 
-      return FutureBuilder<List<Map<String, dynamic>>>(
-        future: ApiService.getRecommendations(widget.userId!),
-        builder: (context, snapshot) {
+        return FutureBuilder<List<Map<String, dynamic>>>(
+          key: ValueKey(_recommendationKey),
+          future: ApiService.getRecommendations(widget.userId!),        builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Center(
               child: CircularProgressIndicator(
@@ -911,15 +914,15 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
                       setState(() {
                         _searchQuery = value.trim();
                       });
-                      _fetchProducts();
                     },
                     onSubmitted: (value) {
-                      if (_selectedIndex == 0) {
                         setState(() {
-                          _selectedIndex = 1;
+                            _searchQuery = value.trim();
+                            if (_selectedIndex == 0) {
+                                _selectedIndex = 1;
+                            }
                         });
-                      }
-                      _fetchProducts();
+                        _fetchProducts();
                     },
                     decoration: const InputDecoration(
                       hintText: 'Search',
@@ -1834,6 +1837,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
                 _fetchStores();
                 _checkCartStatus();
                 _fetchUserData();
+                if (index == 0) _recommendationKey++; 
                 if (index == 1) {
                   _fetchProducts();
                 }
