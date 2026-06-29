@@ -26,6 +26,8 @@ class ProductDetailsScreen extends StatefulWidget {
 }
 
 class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
+  Map<String, dynamic> _productDetails = {};
+
   void _showSnackBar(String message, Color backgroundColor) {
     if (!mounted) return;
     bool isError = backgroundColor == ProductDetailsStyles.errorColor;
@@ -45,6 +47,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
   String _storeRating = '...';
 
   bool _hasCartItems = false;
+  bool _isFavorited = false;
 
   double _tryOnProgress = 0.0;
 
@@ -59,14 +62,34 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
   @override
   void initState() {
     super.initState();
+    _productDetails = Map<String, dynamic>.from(widget.product);
     _checkCartStatus();
-    
-    final stock = widget.product['stock_quantity'];
+    _isFavorited = _productDetails['is_favorited'] == 1 || _productDetails['is_favorited'] == true;
+
+    final stock = _productDetails['stock_quantity'];
     _stockQuantity = stock is int ? stock : int.tryParse(stock.toString()) ?? 0;
     _fetchVariants();
     _fetchStoreRating();
     _fetchReviews();
     _fetchSimilarProducts();
+    _fetchProductDetails();
+  }
+
+  Future<void> _fetchProductDetails() async {
+    final productIdVal = widget.product['id'] ?? widget.product['product_id'];
+    if (productIdVal == null) return;
+    final productId = productIdVal.toString();
+    try {
+      final result = await ApiService.getProductById(productId, userId: widget.userId);
+      if (result['success'] && result['data'] != null) {
+        if (mounted) {
+          setState(() {
+            _productDetails = Map<String, dynamic>.from(result['data']);
+            _isFavorited = _productDetails['is_favorited'] == 1 || _productDetails['is_favorited'] == true;
+          });
+        }
+      }
+    } catch (_) {}
   }
 
   Future<void> _fetchReviews() async {
@@ -176,8 +199,22 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
         userId: widget.userId,
       );
       if (mounted) {
+        final similarList = result['success'] ? (result['data'] ?? []) : [];
+        try {
+          final discounts = await ApiService.getActivePromotionDiscounts();
+          for (var prod in similarList) {
+            final pIdVal = prod['id'] ?? prod['product_id'];
+            if (pIdVal != null) {
+              final pId = int.tryParse(pIdVal.toString()) ?? 0;
+              if (discounts.containsKey(pId)) {
+                prod['promotion_discount'] = discounts[pId];
+              }
+            }
+          }
+        } catch (_) {}
+
         setState(() {
-          _similarProducts = result['success'] ? (result['data'] ?? []) : [];
+          _similarProducts = similarList;
           _isLoadingSimilar = false;
         });
       }
@@ -296,7 +333,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
 
   String _getCurrentPrice() {
     if (_variants.isEmpty) {
-      return widget.product['price']?.toString() ?? '0';
+      return (_productDetails['price'] ?? widget.product['price'])?.toString() ?? '0';
     }
 
     final variant = _variants.firstWhere(
@@ -312,7 +349,30 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
       return variant['price_per_variant'].toString();
     }
 
-    return widget.product['price']?.toString() ?? '0';
+    return (_productDetails['price'] ?? widget.product['price'])?.toString() ?? '0';
+  }
+
+  Map<String, dynamic> _getDiscountInfo() {
+    final discountRaw = _productDetails['promotion_discount'] ?? widget.product['promotion_discount'];
+    final discount = discountRaw != null
+        ? (discountRaw is num ? discountRaw.toDouble() : double.tryParse(discountRaw.toString()))
+        : null;
+    final hasDiscount = discount != null && discount > 0;
+    
+    if (!hasDiscount) {
+      return {'hasDiscount': false};
+    }
+    
+    final rawPriceStr = _getCurrentPrice();
+    final rawPrice = double.tryParse(rawPriceStr) ?? 0.0;
+    final discountedPrice = rawPrice * (1 - discount / 100);
+    
+    return {
+      'hasDiscount': true,
+      'discount': discount,
+      'originalPrice': rawPrice,
+      'discountedPrice': discountedPrice,
+    };
   }
 
   Future<void> _onTryOnPressed() async {
@@ -830,11 +890,11 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
   @override
   Widget build(BuildContext context) {
     final name =
-        widget.product['product_name'] ?? widget.product['name'] ?? 'Product';
-    final storeName = widget.product['store_name']?.toString() ?? 'Store';
+        _productDetails['product_name'] ?? _productDetails['name'] ?? widget.product['product_name'] ?? widget.product['name'] ?? 'Product';
+    final storeName = (_productDetails['store_name'] ?? widget.product['store_name'])?.toString() ?? 'Store';
     final description =
-        widget.product['description'] ?? 'No description available.';
-    final images = widget.product['product_images'] as List? ?? [];
+        _productDetails['description'] ?? widget.product['description'] ?? 'No description available.';
+    final images = (_productDetails['product_images'] ?? widget.product['product_images']) as List? ?? [];
 
     return Scaffold(
       backgroundColor: ProductDetailsStyles.whiteColor,
@@ -974,7 +1034,41 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                 ),
                 ProductDetailsStyles.sizedBoxHeight12,
               ],
-              _buildRoundButton(icon: Icons.favorite_border, onPressed: () {}),
+              _buildRoundButton(
+                icon: _isFavorited ? Icons.favorite : Icons.favorite_border,
+                onPressed: () async {
+                  if (widget.userId == null) {
+                    _showSnackBar(
+                      'Please log in to save favorites',
+                      ProductDetailsStyles.errorColor,
+                    );
+                    return;
+                  }
+
+                  final productIdVal = widget.product['id'] ?? widget.product['product_id'];
+                  if (productIdVal == null) return;
+
+                  final productId = productIdVal is int
+                      ? productIdVal
+                      : int.tryParse(productIdVal.toString());
+                  if (productId == null) return;
+
+                  final result = await ApiService.toggleWishlistItem(
+                    userId: widget.userId!,
+                    productId: productId,
+                    isFavorited: _isFavorited,
+                  );
+
+                  if (result['success']) {
+                    setState(() {
+                      _isFavorited = !_isFavorited;
+                      widget.product['is_favorited'] = _isFavorited ? 1 : 0;
+                    });
+                  } else {
+                    _showSnackBar('Failed to update saved items', ProductDetailsStyles.errorColor);
+                  }
+                },
+              ),
               ProductDetailsStyles.sizedBoxHeight12,
               _buildRoundButton(
                 icon: Icons.chat_bubble_outline,
@@ -1452,6 +1546,9 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
   }
 
   Widget _buildBottomBar(String price) {
+    final discountInfo = _getDiscountInfo();
+    final hasDiscount = discountInfo['hasDiscount'] as bool? ?? false;
+
     return Container(
       padding: ProductDetailsStyles.paddingSymmetricHorizontal24Vertical12,
       decoration: ProductDetailsStyles.bottomBarDecoration,
@@ -1467,14 +1564,54 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                 style: ProductDetailsStyles.totalPriceLabelStyle,
               ),
               ProductDetailsStyles.sizedBoxHeight4,
-              Text(
-                "Rs $price",
-                style: const TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
-                  color: ProductDetailsStyles.darkTextColor,
+              if (hasDiscount) ...[
+                Row(
+                  children: [
+                    Text(
+                      "Rs ${(discountInfo['originalPrice'] as double).toStringAsFixed(0)}",
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Colors.grey,
+                        decoration: TextDecoration.lineThrough,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      "Rs ${(discountInfo['discountedPrice'] as double).toStringAsFixed(0)}",
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: Color(0xFFD4845A),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFD4845A),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Text(
+                        "-${(discountInfo['discount'] as double).toStringAsFixed(0)}%",
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 9,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
-              ),
+              ] else ...[
+                Text(
+                  "Rs $price",
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: ProductDetailsStyles.darkTextColor,
+                  ),
+                ),
+              ],
             ],
           ),
 
@@ -1747,7 +1884,6 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
               final name = product['product_name'] ??
                   product['name'] ??
                   'Product';
-              final price = product['price']?.toString() ?? '0';
 
               return GestureDetector(
                 onTap: () {
@@ -1761,81 +1897,152 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                     ),
                   );
                 },
-                child: Container(
-                  width: 150,
-                  margin: const EdgeInsets.only(right: 12),
-                  decoration: BoxDecoration(
-                    color: ProductDetailsStyles.beigeBackgroundColor,
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(
-                      color: ProductDetailsStyles.greyBorderColor
-                          .withOpacity(0.4),
-                    ),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      // Product image
-                      ClipRRect(
-                        borderRadius: const BorderRadius.only(
-                          topLeft: Radius.circular(16),
-                          topRight: Radius.circular(16),
-                        ),
-                        child: SizedBox(
-                          height: 130,
-                          width: double.infinity,
-                          child: imageUrl == null
-                              ? const Icon(
-                                  Icons.image_not_supported,
-                                  color: ProductDetailsStyles.lightGrayColor,
-                                )
-                              : imageUrl.startsWith('http')
-                                  ? Image.network(
-                                      imageUrl,
-                                      fit: BoxFit.cover,
-                                      errorBuilder: (_, __, ___) => const Icon(
-                                        Icons.image_not_supported,
-                                        color:
-                                            ProductDetailsStyles.lightGrayColor,
-                                      ),
-                                    )
-                                  : Image.asset(
-                                      imageUrl,
-                                      fit: BoxFit.cover,
-                                    ),
-                        ),
+                child: () {
+                  final rawPrice = double.tryParse(product['price']?.toString() ?? '0') ?? 0.0;
+                  final discountRaw = product['promotion_discount'];
+                  final discount = discountRaw != null
+                      ? (discountRaw is num ? discountRaw.toDouble() : double.tryParse(discountRaw.toString()))
+                      : null;
+                  final hasDiscount = discount != null && discount > 0;
+                  final discountedPrice = hasDiscount ? rawPrice * (1 - discount / 100) : null;
+
+                  return Container(
+                    width: 150,
+                    margin: const EdgeInsets.only(right: 12),
+                    decoration: BoxDecoration(
+                      color: ProductDetailsStyles.beigeBackgroundColor,
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                        color: ProductDetailsStyles.greyBorderColor
+                            .withOpacity(0.4),
                       ),
-                      // Product info
-                      Padding(
-                        padding: const EdgeInsets.all(8),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        // Product image
+                        Stack(
                           children: [
-                            Text(
-                              name,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600,
-                                color: ProductDetailsStyles.darkTextColor,
+                            ClipRRect(
+                              borderRadius: const BorderRadius.only(
+                                topLeft: Radius.circular(16),
+                                topRight: Radius.circular(16),
+                              ),
+                              child: SizedBox(
+                                height: 130,
+                                width: double.infinity,
+                                child: imageUrl == null || imageUrl.isEmpty
+                                    ? const Icon(
+                                        Icons.image_not_supported,
+                                        color: ProductDetailsStyles.lightGrayColor,
+                                      )
+                                    : (imageUrl.startsWith('http')
+                                        ? Image.network(
+                                            imageUrl,
+                                            fit: BoxFit.cover,
+                                            alignment: Alignment.topCenter,
+                                            errorBuilder: (_, __, ___) => const Icon(
+                                              Icons.image_not_supported,
+                                              color: ProductDetailsStyles.lightGrayColor,
+                                            ),
+                                          )
+                                        : (imageUrl.startsWith('assets/')
+                                            ? Image.asset(
+                                                imageUrl,
+                                                fit: BoxFit.cover,
+                                                alignment: Alignment.topCenter,
+                                              )
+                                            : Image.memory(
+                                                base64Decode(imageUrl.split(',').last),
+                                                fit: BoxFit.cover,
+                                                alignment: Alignment.topCenter,
+                                                errorBuilder: (_, __, ___) => const Icon(
+                                                  Icons.image_not_supported,
+                                                  color: ProductDetailsStyles.lightGrayColor,
+                                                ),
+                                              ))),
                               ),
                             ),
-                            const SizedBox(height: 4),
-                            Text(
-                              'Rs $price',
-                              style: const TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.bold,
-                                color: ProductDetailsStyles.primaryColor,
+                            if (hasDiscount)
+                              Positioned(
+                                top: 6,
+                                left: 6,
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFFD4845A),
+                                    borderRadius: BorderRadius.circular(6),
+                                  ),
+                                  child: Text(
+                                    '-${discount.toStringAsFixed(0)}%',
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 8,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ),
                               ),
-                            ),
                           ],
                         ),
-                      ),
-                    ],
-                  ),
-                ),
+                        // Product info
+                        Padding(
+                          padding: const EdgeInsets.all(8),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                name,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600,
+                                  color: ProductDetailsStyles.darkTextColor,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              if (hasDiscount)
+                                Row(
+                                  children: [
+                                    Text(
+                                      'Rs ${rawPrice.toStringAsFixed(0)}',
+                                      style: const TextStyle(
+                                        fontSize: 10,
+                                        color: Colors.grey,
+                                        decoration: TextDecoration.lineThrough,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 4),
+                                    Flexible(
+                                      child: Text(
+                                        'Rs ${discountedPrice!.toStringAsFixed(0)}',
+                                        style: const TextStyle(
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.bold,
+                                          color: Color(0xFFD4845A),
+                                        ),
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                  ],
+                                )
+                              else
+                                Text(
+                                  'Rs ${rawPrice.toStringAsFixed(0)}',
+                                  style: const TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
+                                    color: ProductDetailsStyles.primaryColor,
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }(),
               );
             },
           ),

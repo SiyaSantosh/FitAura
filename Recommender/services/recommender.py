@@ -5,16 +5,26 @@ from db.connection import get_connection
 
 model = SentenceTransformer('all-MiniLM-L6-v2')
 
+import json
+
 def get_all_approved_products():
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT product_id, product_name, description, category, gender, price
+        SELECT product_id, product_name, description, category, gender, price, product_images
         FROM products
         WHERE is_verified = 1 AND is_visible = 1
     """)
     products = cursor.fetchall()
     conn.close()
+    for p in products:
+        if p.get('product_images'):
+            try:
+                p['product_images'] = json.loads(p['product_images'])
+            except Exception:
+                p['product_images'] = []
+        else:
+            p['product_images'] = []
     return products
 
 def get_search_based_recommendations(user_id: int, limit: int = 10):
@@ -56,7 +66,7 @@ def get_trending_products(limit: int = 10):
     cursor = conn.cursor()
     cursor.execute("""
         SELECT p.product_id, p.product_name, p.description,
-               p.category, p.gender, p.price,
+               p.category, p.gender, p.price, p.product_images,
                COUNT(oi.product_id) as order_count
         FROM products p
         LEFT JOIN order_items oi ON p.product_id = oi.product_id
@@ -68,6 +78,14 @@ def get_trending_products(limit: int = 10):
     """, (limit,))
     result = cursor.fetchall()
     conn.close()
+    for p in result:
+        if p.get('product_images'):
+            try:
+                p['product_images'] = json.loads(p['product_images'])
+            except Exception:
+                p['product_images'] = []
+        else:
+            p['product_images'] = []
     return result
 
 

@@ -5,8 +5,11 @@ import 'sign_in_screen.dart';
 
 import 'help_center_screen.dart';
 import 'customer_profile_detail_screen.dart';
+import 'customer_settings_screen.dart';
 import 'my_orders_screen.dart';
 import '../styles/profile_styles.dart';
+import 'complaints_screen.dart';
+import 'wallet_screen.dart';
 
 class ProfileScreen extends StatefulWidget {
   final int? userId;
@@ -226,6 +229,7 @@ class _ProfileScreenState extends State<ProfileScreen> with TickerProviderStateM
             
             _buildMenuItem(Icons.person_outline, 'Your profile'),
             _buildMenuItem(Icons.account_balance_wallet_outlined, 'Wallet'),
+            _buildMenuItem(Icons.feedback_outlined, 'Complaints'),
             _buildMenuItem(Icons.assignment_outlined, 'My Orders'),
             _buildMenuItem(Icons.settings_outlined, 'Settings'),
             _buildMenuItem(Icons.help_outline, 'Help Center'),
@@ -294,6 +298,24 @@ class _ProfileScreenState extends State<ProfileScreen> with TickerProviderStateM
             );
             _fetchUserData();
           }
+        } else if (title == 'Wallet') {
+          if (_userData != null) {
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (context) => WalletScreen(userId: _userData!['user_id'] as int),
+              ),
+            );
+          }
+        } else if (title == 'Complaints') {
+          if (_userData != null) {
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (context) => ComplaintsScreen(userId: _userData!['user_id'] as int),
+              ),
+            );
+          }
         } else if (title == 'My Orders') {
           if (_userData != null) {
             Navigator.push(
@@ -308,6 +330,13 @@ class _ProfileScreenState extends State<ProfileScreen> with TickerProviderStateM
             context,
             MaterialPageRoute(builder: (context) => const HelpCenterScreen()),
           );
+        } else if (title == 'Settings') {
+          if (_userData != null) {
+            Navigator.push(
+              context,
+              MaterialPageRoute(builder: (context) => CustomerSettingsScreen(userId: _userData!['user_id'] as int)),
+            );
+          }
         }
       },
       splashColor: ProfileStyles.transparentColor,

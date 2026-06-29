@@ -29,8 +29,8 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   String _paymentMethod = 'Cash On Delivery';
   String? _address;
   String? _contactNumber;
-  String? _userName;
   bool _isLoading = true;
+  double _walletStoreBalance = 0.0;
   final TextEditingController _addressController = TextEditingController();
   final TextEditingController _contactNumberController = TextEditingController();
 
@@ -38,6 +38,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   void initState() {
     super.initState();
     _fetchUserData();
+    _fetchWalletData();
   }
 
   Future<void> _fetchUserData() async {
@@ -46,7 +47,6 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       if (mounted && result['success']) {
         final data = result['data'];
         setState(() {
-          _userName = data['name'];
           _address = data['address'] ?? 'No address provided';
           _addressController.text = _address!;
           _contactNumber = data['contact_number'] ?? '';
@@ -57,6 +57,75 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     } catch (e) {
       if (mounted) setState(() => _isLoading = false);
     }
+  }
+
+  Future<void> _fetchWalletData() async {
+    try {
+      final result = await ApiService.getWalletData(widget.userId);
+      if (!mounted) return;
+      if (result['success']) {
+        final data = result['data'] as Map<String, dynamic>;
+        final storeBalances = (data['store_balances'] as List<dynamic>?) ?? [];
+        final currentStoreBalance = _getEligibleStoreBalance(storeBalances);
+        setState(() {
+          _walletStoreBalance = currentStoreBalance;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() {
+        _walletStoreBalance = 0.0;
+      });
+    }
+  }
+
+  List<String> _cartStoreIds() {
+    return widget.cartItems
+        .map((item) => item['store_id']?.toString() ?? '')
+        .where((id) => id.isNotEmpty)
+        .toSet()
+        .toList();
+  }
+
+  double _getEligibleStoreBalance(List<dynamic> storeBalances) {
+    final storeIds = _cartStoreIds();
+    if (storeIds.length != 1) return 0.0;
+
+    final storeId = storeIds.first;
+    final matchingStore = storeBalances.cast<Map<String, dynamic>>().firstWhere(
+      (store) => store['store_id']?.toString() == storeId,
+      orElse: () => <String, dynamic>{},
+    );
+
+    if (matchingStore.isEmpty) return 0.0;
+
+    return double.tryParse(matchingStore['balance']?.toString() ?? '0') ?? 0.0;
+  }
+
+  String? _getEligibleStoreName() {
+    final storeIds = _cartStoreIds();
+    if (storeIds.length != 1) return null;
+    final storeItem = widget.cartItems.firstWhere(
+      (item) => item['store_id']?.toString() == storeIds.first,
+      orElse: () => <String, dynamic>{},
+    );
+    final storeName = storeItem['store_name'];
+    return storeName?.toString();
+  }
+
+  bool get _walletAvailable {
+    return _walletStoreBalance > 0 && _getEligibleStoreName() != null;
+  }
+
+  String get _paymentMethodDescription {
+    if (_paymentMethod == 'Wallet Credits') {
+      if (_walletStoreBalance >= _totalCost) {
+        return 'Use wallet credit for full payment';
+      }
+      final walletUsed = _walletStoreBalance;
+      final cashRequired = (_totalCost - walletUsed).clamp(0.0, double.infinity);
+      return 'Use Rs ${walletUsed.toStringAsFixed(2)} wallet credit + Rs ${cashRequired.toStringAsFixed(2)} cash';
+    }
+    return 'Pay when you receive';
   }
 
   @override
@@ -106,14 +175,21 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
       final double basePrice = double.tryParse(item['price']?.toString() ?? '0') ?? 0.0;
       final double itemPrice = (pricePerVariant > 0) ? pricePerVariant : basePrice;
 
+      final discountRaw = item['promotion_discount'];
+      final discount = discountRaw != null
+          ? (discountRaw is num ? discountRaw.toDouble() : double.tryParse(discountRaw.toString()))
+          : null;
+      final double finalPrice = (discount != null && discount > 0) ? itemPrice * (1 - discount / 100) : itemPrice;
+
       return {
         'product_id': item['productId'],
         'variant_id': item['variant_id'],
         'product_name': item['product_name'],
-        'price': itemPrice,
+        'price': finalPrice,
         'quantity': item['quantity'],
         'size': item['size'],
         'color': item['color'],
+        'store_id': item['store_id'],
       };
     }).toList();
 
@@ -377,6 +453,58 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     );
   }
 
+  void _showPaymentMethodSelector() {
+    if (!_walletAvailable) return;
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: CheckoutStyles.whiteColor,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) {
+        return Container(
+          padding: CheckoutStyles.paddingAll24,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                "Select Payment Method",
+                style: CheckoutStyles.dialogTitleStyle,
+              ),
+              CheckoutStyles.sizedBoxHeight24,
+              _buildPaymentOption('Cash On Delivery', 'Pay when you receive'),
+              CheckoutStyles.sizedBoxHeight12,
+              _buildPaymentOption('Wallet Credits', 'Use wallet balance for this store'),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildPaymentOption(String method, String description) {
+    return ListTile(
+      leading: Radio<String>(
+        value: method,
+        groupValue: _paymentMethod,
+        onChanged: (value) {
+          if (value != null) {
+            setState(() => _paymentMethod = value);
+            Navigator.pop(context);
+          }
+        },
+        activeColor: CheckoutStyles.primaryColor,
+      ),
+      title: Text(method, style: CheckoutStyles.cardTitleStyle),
+      subtitle: Text(description),
+      onTap: () {
+        setState(() => _paymentMethod = method);
+        Navigator.pop(context);
+      },
+    );
+  }
+
   void _showAddressEditDialog() {
     String? localError;
     showModalBottomSheet(
@@ -599,6 +727,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
 
   Widget _buildPaymentMethodCard() {
     return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Container(
           padding: CheckoutStyles.paddingAll12,
@@ -610,18 +739,26 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text(
-                "Cash On Delivery",
+              Text(
+                _paymentMethod,
                 style: CheckoutStyles.cardTitleStyle,
               ),
               CheckoutStyles.sizedBoxHeight4,
-              const Text(
-                "Pay when you receive",
+              Text(
+                _paymentMethodDescription,
                 style: CheckoutStyles.cardSubtitleStyle,
               ),
             ],
           ),
         ),
+        if (_walletAvailable)
+          TextButton(
+            onPressed: _showPaymentMethodSelector,
+            child: const Text(
+              'CHANGE',
+              style: CheckoutStyles.changeButtonStyle,
+            ),
+          ),
       ],
     );
   }
@@ -670,7 +807,15 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     for (var item in items) {
       final double pricePerVariant = double.tryParse(item['price_per_variant']?.toString() ?? '0') ?? 0.0;
       final double basePrice = double.tryParse(item['price']?.toString() ?? '0') ?? 0.0;
-      final double itemPrice = (pricePerVariant > 0) ? pricePerVariant : basePrice;
+      double itemPrice = (pricePerVariant > 0) ? pricePerVariant : basePrice;
+      
+      final discountRaw = item['promotion_discount'];
+      final discount = discountRaw != null
+          ? (discountRaw is num ? discountRaw.toDouble() : double.tryParse(discountRaw.toString()))
+          : null;
+      if (discount != null && discount > 0) {
+        itemPrice = itemPrice * (1 - discount / 100);
+      }
       
       final int quantity = item['quantity'] is int 
           ? item['quantity'] 
@@ -684,6 +829,17 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
   Widget _buildOrderItem(dynamic item) {
     final images = item['product_images'] as List? ?? [];
     final imageSource = images.isNotEmpty ? images[0].toString() : '';
+
+    final double pricePerVariant = double.tryParse(item['price_per_variant']?.toString() ?? '0') ?? 0.0;
+    final double basePrice = double.tryParse(item['price']?.toString() ?? '0') ?? 0.0;
+    final double displayPrice = (pricePerVariant > 0) ? pricePerVariant : basePrice;
+
+    final discountRaw = item['promotion_discount'];
+    final discount = discountRaw != null
+        ? (discountRaw is num ? discountRaw.toDouble() : double.tryParse(discountRaw.toString()))
+        : null;
+    final hasDiscount = discount != null && discount > 0;
+    final double discountedPrice = hasDiscount ? displayPrice * (1 - discount / 100) : displayPrice;
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
@@ -715,10 +871,33 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
                   style: CheckoutStyles.itemAttrStyle,
                 ),
                 CheckoutStyles.sizedBoxHeight8,
-                Text(
-                  "Rs ${_getOrderItemPrice(item)}",
-                  style: CheckoutStyles.itemPriceStyle,
-                ),
+                if (hasDiscount)
+                  Row(
+                    children: [
+                      Text(
+                        'Rs ${displayPrice.toStringAsFixed(0)}',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: Colors.grey,
+                          decoration: TextDecoration.lineThrough,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        'Rs ${discountedPrice.toStringAsFixed(0)}',
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.bold,
+                          color: Color(0xFFD4845A),
+                        ),
+                      ),
+                    ],
+                  )
+                else
+                  Text(
+                    "Rs ${displayPrice.toStringAsFixed(0)}",
+                    style: CheckoutStyles.itemPriceStyle,
+                  ),
               ],
             ),
           ),
@@ -727,12 +906,7 @@ class _CheckoutScreenState extends State<CheckoutScreen> {
     );
   }
 
-  String _getOrderItemPrice(dynamic item) {
-    final double pricePerVariant = double.tryParse(item['price_per_variant']?.toString() ?? '0') ?? 0.0;
-    final double basePrice = double.tryParse(item['price']?.toString() ?? '0') ?? 0.0;
-    final double itemPrice = (pricePerVariant > 0) ? pricePerVariant : basePrice;
-    return itemPrice.toString();
-  }
+
 
   Widget _buildOrderItemImage(String source) {
     if (source.isEmpty) return const Icon(Icons.image_not_supported);

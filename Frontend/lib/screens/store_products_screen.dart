@@ -51,6 +51,7 @@ class _StoreProductsScreenState extends State<StoreProductsScreen> {
       final result = await ApiService.getStoreProducts(
         widget.storeId,
         role: 'customer',
+        userId: widget.userId,
       );
       if (result['success']) {
         setState(() {
@@ -156,6 +157,42 @@ class _StoreProductsScreenState extends State<StoreProductsScreen> {
   void dispose() {
     _searchController.dispose();
     super.dispose();
+  }
+
+  void _showSnackBar(String message, {Color backgroundColor = Colors.black}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: backgroundColor,
+      ),
+    );
+  }
+
+  Future<void> _toggleWishlistItem(Map<String, dynamic> product) async {
+    if (widget.userId == null) {
+      _showSnackBar('Please log in to save favorites', backgroundColor: Colors.red);
+      return;
+    }
+
+    final productIdVal = product['product_id'] ?? product['id'];
+    if (productIdVal == null) return;
+    final productId = productIdVal is int ? productIdVal : int.tryParse(productIdVal.toString());
+    if (productId == null) return;
+
+    final isFavorited = product['is_favorited'] == 1 || product['is_favorited'] == true;
+    final result = await ApiService.toggleWishlistItem(
+      userId: widget.userId!,
+      productId: productId,
+      isFavorited: isFavorited,
+    );
+    if (result['success']) {
+      setState(() {
+        product['is_favorited'] = isFavorited ? 0 : 1;
+      });
+    } else {
+      _showSnackBar('Failed to update saved items', backgroundColor: Colors.red);
+    }
   }
 
   void _showFilterBottomSheet() {
@@ -771,7 +808,15 @@ class _StoreProductsScreenState extends State<StoreProductsScreen> {
 
     final String imageSource = images.isNotEmpty ? images.first : '';
     final String name = product['product_name'] ?? 'Product';
-    final String price = product['price']?.toString() ?? '0';
+    final double rawPrice = double.tryParse(product['price']?.toString() ?? '0') ?? 0.0;
+
+    // Promotion discount
+    final discountRaw = product['promotion_discount'];
+    final discount = discountRaw != null
+        ? (discountRaw is num ? discountRaw.toDouble() : double.tryParse(discountRaw.toString()))
+        : null;
+    final hasDiscount = discount != null && discount > 0;
+    final discountedPrice = hasDiscount ? rawPrice * (1 - discount / 100) : null;
 
     product['store_name'] = widget.storeName;
     product['product_images'] = images;
@@ -792,26 +837,71 @@ class _StoreProductsScreenState extends State<StoreProductsScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Expanded(
-              child: ClipRRect(
-                borderRadius: StoreProductsStyles.cardTopRadius,
-                child: Container(
-                  width: double.infinity,
-                  color: StoreProductsStyles.secondaryColor,
-                  child: imageSource.isNotEmpty
-                      ? (imageSource.startsWith('http')
-                            ? Image.network(
-                                imageSource,
-                                fit: StoreProductsStyles.imageFit,
-                              )
-                            : Image.memory(
-                                base64Decode(imageSource.split(',').last),
-                                fit: StoreProductsStyles.imageFit,
-                              ))
-                      : const Icon(
-                          StoreProductsStyles.errorIcon,
-                          color: StoreProductsStyles.lightGrayColor,
+              child: Stack(
+                children: [
+                  Positioned.fill(
+                    child: ClipRRect(
+                      borderRadius: StoreProductsStyles.cardTopRadius,
+                      child: Container(
+                        color: StoreProductsStyles.secondaryColor,
+                        child: imageSource.isNotEmpty
+                            ? (imageSource.startsWith('http')
+                                  ? Image.network(
+                                      imageSource,
+                                      fit: StoreProductsStyles.imageFit,
+                                    )
+                                  : Image.memory(
+                                      base64Decode(imageSource.split(',').last),
+                                      fit: StoreProductsStyles.imageFit,
+                                    ))
+                            : const Icon(
+                                StoreProductsStyles.errorIcon,
+                                color: StoreProductsStyles.lightGrayColor,
+                              ),
+                      ),
+                    ),
+                  ),
+                  // Discount badge (top-left)
+                  if (hasDiscount)
+                    Positioned(
+                      top: 8,
+                      left: 8,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFD4845A),
+                          borderRadius: BorderRadius.circular(8),
                         ),
-                ),
+                        child: Text(
+                          '-${discount.toStringAsFixed(0)}%',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.3,
+                          ),
+                        ),
+                      ),
+                    ),
+                  Positioned(
+                    top: 8,
+                    right: 8,
+                    child: GestureDetector(
+                      onTap: () async => await _toggleWishlistItem(product),
+                      child: Container(
+                        padding: const EdgeInsets.all(6),
+                        decoration: StoreProductsStyles.favoriteIconDecoration,
+                        child: Icon(
+                          product['is_favorited'] == 1 || product['is_favorited'] == true
+                              ? Icons.favorite
+                              : Icons.favorite_border,
+                          color: StoreProductsStyles.primaryColor,
+                          size: StoreProductsStyles.favoriteIconSize,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
             Padding(
@@ -826,7 +916,34 @@ class _StoreProductsScreenState extends State<StoreProductsScreen> {
                     style: StoreProductsStyles.cardTitleStyle,
                   ),
                   StoreProductsStyles.vSpaceTiny,
-                  Text('Rs $price', style: StoreProductsStyles.cardPriceStyle),
+                  if (hasDiscount)
+                    Row(
+                      children: [
+                        Text(
+                          'Rs ${rawPrice.toStringAsFixed(0)}',
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: Colors.grey,
+                            decoration: TextDecoration.lineThrough,
+                            decorationColor: Colors.grey,
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Flexible(
+                          child: Text(
+                            'Rs ${discountedPrice!.toStringAsFixed(0)}',
+                            style: const TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w700,
+                              color: Color(0xFFD4845A),
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    )
+                  else
+                    Text('Rs ${rawPrice.toStringAsFixed(0)}', style: StoreProductsStyles.cardPriceStyle),
                 ],
               ),
             ),

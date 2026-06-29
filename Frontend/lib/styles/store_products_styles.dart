@@ -108,6 +108,20 @@ class StoreProductsStyles {
     ],
   );
 
+  static final BoxDecoration favoriteIconDecoration = BoxDecoration(
+    color: whiteColor,
+    shape: BoxShape.circle,
+    boxShadow: [
+      BoxShadow(
+        color: Colors.black12,
+        blurRadius: 4,
+        offset: const Offset(0, 2),
+      ),
+    ],
+  );
+
+  static const double favoriteIconSize = 16.0;
+
   static const BorderRadius cardTopRadius = BorderRadius.vertical(top: Radius.circular(16));
 
   static final BoxDecoration filterBottomSheetDecoration = BoxDecoration(

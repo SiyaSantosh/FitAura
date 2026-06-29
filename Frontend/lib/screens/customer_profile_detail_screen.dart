@@ -119,10 +119,14 @@ class _CustomerProfileDetailScreenState extends State<CustomerProfileDetailScree
         final List orders = orderRes['data'] ?? [];
         if (mounted) setState(() => _orderCount = orders.length);
       }
+
+      final wishlistRes = await ApiService.getWishlistCount(_userData['user_id']);
+      if (wishlistRes['success']) {
+        if (mounted) setState(() => _wishlistCount = wishlistRes['count'] ?? 0);
+      }
       
       if (mounted) {
         setState(() {
-          _wishlistCount = 0; 
           _isLoading = false;
         });
       }

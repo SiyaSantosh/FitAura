@@ -67,6 +67,14 @@ class _CartScreenState extends State<CartScreen> {
       double basePrice = double.tryParse(item['price']?.toString() ?? '0') ?? 0.0;
       double price = (pricePerVariant > 0) ? pricePerVariant : basePrice;
       
+      final discountRaw = item['promotion_discount'];
+      final discount = discountRaw != null
+          ? (discountRaw is num ? discountRaw.toDouble() : double.tryParse(discountRaw.toString()))
+          : null;
+      if (discount != null && discount > 0) {
+        price = price * (1 - discount / 100);
+      }
+      
       int quantity = item['quantity'] is int ? item['quantity'] : int.tryParse(item['quantity'].toString()) ?? 1;
       tempSubTotal += price * quantity;
     }
@@ -221,6 +229,14 @@ class _CartScreenState extends State<CartScreen> {
     final double pricePerVariant = double.tryParse(item['price_per_variant']?.toString() ?? '0') ?? 0.0;
     final double basePrice = double.tryParse(item['price']?.toString() ?? '0') ?? 0.0;
     final double displayPrice = (pricePerVariant > 0) ? pricePerVariant : basePrice;
+    
+    final discountRaw = item['promotion_discount'];
+    final discount = discountRaw != null
+        ? (discountRaw is num ? discountRaw.toDouble() : double.tryParse(discountRaw.toString()))
+        : null;
+    final hasDiscount = discount != null && discount > 0;
+    final double discountedPrice = hasDiscount ? displayPrice * (1 - discount / 100) : displayPrice;
+    
     final quantity = item['quantity'] ?? 1;
 
     return Dismissible(
@@ -249,6 +265,7 @@ class _CartScreenState extends State<CartScreen> {
                 'product_images': item['product_images'],
                 'store_name': item['store_name'],
                 'description': '', 
+                'promotion_discount': item['promotion_discount'],
             };
 
             await Navigator.push(
@@ -301,10 +318,36 @@ class _CartScreenState extends State<CartScreen> {
                     style: CartStyles.productAttributeStyle,
                   ),
                   CartStyles.sizedBoxHeight8,
-                  Text(
-                    'Rs ${displayPrice.toString()}',
-                    style: CartStyles.productPriceStyle,
-                  ),
+                  if (hasDiscount)
+                    Row(
+                      children: [
+                        Text(
+                          'Rs ${displayPrice.toStringAsFixed(0)}',
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: Colors.grey,
+                            decoration: TextDecoration.lineThrough,
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Flexible(
+                          child: Text(
+                            'Rs ${discountedPrice.toStringAsFixed(0)}',
+                            style: const TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w700,
+                              color: Color(0xFFD4845A),
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    )
+                  else
+                    Text(
+                      'Rs ${displayPrice.toStringAsFixed(0)}',
+                      style: CartStyles.productPriceStyle,
+                    ),
                 ],
               ),
             ),

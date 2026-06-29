@@ -147,6 +147,8 @@ CREATE TABLE `orders` (
   `shipping_type` enum('economy','regular') COLLATE utf8mb4_general_ci NOT NULL,
   `payment_method` varchar(50) COLLATE utf8mb4_general_ci NOT NULL,
   `total_price` int NOT NULL,
+  `wallet_amount` decimal(10,2) NOT NULL DEFAULT 0.00,
+  `cash_amount` decimal(10,2) NOT NULL DEFAULT 0.00,
   `order_status` enum('pending','accepted','rejected','shipped','delivered','cancelled','completed') COLLATE utf8mb4_general_ci NOT NULL DEFAULT 'pending',
   `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -398,6 +400,39 @@ LOCK TABLES `usertypes` WRITE;
 INSERT INTO `usertypes` VALUES (1,'customer'),(2,'seller'),(3,'admin');
 /*!40000 ALTER TABLE `usertypes` ENABLE KEYS */;
 UNLOCK TABLES;
+--
+-- Table structure for table `promotions`
+--
+
+DROP TABLE IF EXISTS `promotions`;
+CREATE TABLE `promotions` (
+  `promotion_id` int NOT NULL AUTO_INCREMENT,
+  `store_id` int NOT NULL,
+  `title` varchar(255) COLLATE utf8mb4_general_ci NOT NULL,
+  `discount` int NOT NULL,
+  `start_date` date NOT NULL,
+  `end_date` date NOT NULL,
+  `status` int NOT NULL DEFAULT '1',
+  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`promotion_id`),
+  KEY `store_id` (`store_id`),
+  CONSTRAINT `promotions_ibfk_1` FOREIGN KEY (`store_id`) REFERENCES `store` (`store_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+--
+-- Table structure for table `promotion_products`
+--
+
+DROP TABLE IF EXISTS `promotion_products`;
+CREATE TABLE `promotion_products` (
+  `promotion_id` int NOT NULL,
+  `product_id` int NOT NULL,
+  PRIMARY KEY (`promotion_id`, `product_id`),
+  KEY `product_id` (`product_id`),
+  CONSTRAINT `promotion_products_ibfk_1` FOREIGN KEY (`promotion_id`) REFERENCES `promotions` (`promotion_id`) ON DELETE CASCADE,
+  CONSTRAINT `promotion_products_ibfk_2` FOREIGN KEY (`product_id`) REFERENCES `products` (`product_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
 /*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
 /*!40101 SET SQL_MODE=@OLD_SQL_MODE */;

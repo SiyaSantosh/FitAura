@@ -57,11 +57,20 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
 
   List<Map<String, dynamic>> _products = [];
   bool _isProductsLoading = false;
+  List<Map<String, dynamic>> _wishlistItems = [];
+  bool _isWishlistLoading = false;
 
   bool _hasCartItems = false;
   Map<String, dynamic>? _userData;
   List<Map<String, dynamic>> _notifications = [];
   bool _isNotificationsLoading = false;
+
+  bool get _hasUnreadNotifications {
+    return _notifications.any((notification) {
+      final value = notification['is_read'];
+      return value == 0 || value == '0' || value == false || value == 'false';
+    });
+  }
 
   int _chatRefreshKey = 0;
 
@@ -83,6 +92,10 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
     _fetchStores();
     _checkCartStatus();
     _fetchUserData();
+    if (widget.userId != null) {
+      _loadWishlistItems();
+      _loadNotifications();
+    }
   }
 
   Future<void> _fetchUserData() async {
@@ -173,6 +186,68 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
       } catch (e) {
         
       }
+    }
+  }
+
+  Future<void> _loadWishlistItems() async {
+    if (widget.userId == null) return;
+    setState(() => _isWishlistLoading = true);
+    try {
+      final result = await ApiService.getWishlistItems(widget.userId!);
+      if (mounted && result['success']) {
+        setState(() {
+          _wishlistItems = List<Map<String, dynamic>>.from(result['data']);
+        });
+      }
+    } catch (_) {
+    } finally {
+      if (mounted) setState(() => _isWishlistLoading = false);
+    }
+  }
+
+  Future<void> _toggleWishlistItem(Map<String, dynamic> product) async {
+    if (widget.userId == null) {
+      _showSnackBar('Please log in to save favorites', CustomerHomeStyles.errorColor);
+      return;
+    }
+
+    final productIdValue = product['product_id'] ?? product['id'];
+    if (productIdValue == null) return;
+    final productId = productIdValue is int ? productIdValue : int.tryParse(productIdValue.toString());
+    if (productId == null) return;
+
+    final isFavorited = (product['is_favorited'] == 1 || product['is_favorited'] == true);
+    final result = await ApiService.toggleWishlistItem(
+      userId: widget.userId!,
+      productId: productId,
+      isFavorited: isFavorited,
+    );
+
+    if (result['success']) {
+      setState(() {
+        product['is_favorited'] = isFavorited ? 0 : 1;
+
+        if (isFavorited) {
+          _wishlistItems.removeWhere((item) {
+            final itemId = item['product_id'] ?? item['id'];
+            return itemId != null && itemId.toString() == productId.toString();
+          });
+        } else {
+          final alreadySaved = _wishlistItems.any((item) {
+            final itemId = item['product_id'] ?? item['id'];
+            return itemId != null && itemId.toString() == productId.toString();
+          });
+          if (!alreadySaved) {
+            _wishlistItems.add(Map<String, dynamic>.from(product));
+          }
+        }
+
+        if (_selectedIndex == 0) {
+          _recommendationKey++;
+        }
+      });
+    } else {
+      _showSnackBar('Failed to update saved items', CustomerHomeStyles.errorColor);
     }
   }
 
@@ -565,7 +640,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
                 children: [
                   _buildHomeTab(),
                   _buildProductsTab(),
-                  const Center(child: Text('Favorites')),
+                  _buildFavoritesTab(),
                   ChatsListScreen(
                     key: ValueKey(_chatRefreshKey),
                     userId: widget.userId,
@@ -607,9 +682,13 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
     Widget _buildRecommendations() {
         if (widget.userId == null) return const SizedBox();
 
-        return FutureBuilder<List<Map<String, dynamic>>>(
+        return FutureBuilder<List<dynamic>>(
           key: ValueKey(_recommendationKey),
-          future: ApiService.getRecommendations(widget.userId!),        builder: (context, snapshot) {
+          future: Future.wait([
+            ApiService.getRecommendations(widget.userId!),
+            ApiService.getActivePromotionDiscounts(),
+          ]),
+          builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Center(
               child: CircularProgressIndicator(
@@ -618,8 +697,26 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
             );
           }
 
-          final recommendations = snapshot.data ?? [];
+          final results = snapshot.data;
+          final recommendations = (results != null ? results[0] : <Map<String, dynamic>>[]) as List<Map<String, dynamic>>;
+          final discounts = (results != null ? results[1] : <int, double>{}) as Map<int, double>;
+
           if (recommendations.isEmpty) return const SizedBox();
+
+          final savedProductIds = _wishlistItems
+              .map((item) => _toInt(item['product_id'] ?? item['id']))
+              .whereType<int>()
+              .toSet();
+          for (final product in recommendations) {
+            final productId = _toInt(product['product_id'] ?? product['id']);
+            if (productId != null && savedProductIds.contains(productId)) {
+              product['is_favorited'] = 1;
+            }
+            // Attach promotion discount for recommendation cards
+            if (productId != null && discounts.containsKey(productId)) {
+              product['promotion_discount'] = discounts[productId];
+            }
+          }
 
           return Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -650,6 +747,107 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
       );
     }
     
+  Widget _buildFavoritesTab() {
+    final title = 'Saved Items';
+    if (widget.userId == null) {
+      return Column(
+        children: [
+          _buildWishlistHeader(title),
+          const Expanded(
+            child: Center(
+              child: Text('Please log in to view your saved products'),
+            ),
+          ),
+        ],
+      );
+    }
+
+    if (_isWishlistLoading) {
+      return Column(
+        children: [
+          _buildWishlistHeader(title),
+          const Expanded(
+            child: Center(
+              child: CircularProgressIndicator(
+                color: CustomerHomeStyles.primaryColor,
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+
+    if (_wishlistItems.isEmpty) {
+      return Column(
+        children: [
+          _buildWishlistHeader(title),
+          const Expanded(
+            child: Center(child: Text('No saved products yet')),
+          ),
+        ],
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildWishlistHeader(title),
+        Expanded(
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final crossAxisCount = constraints.maxWidth > 600 ? 4 : 2;
+              return GridView.builder(
+                padding: CustomerHomeStyles.paddingH24,
+                itemCount: _wishlistItems.length,
+                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: crossAxisCount,
+                  childAspectRatio: 0.7,
+                  crossAxisSpacing: 16,
+                  mainAxisSpacing: 16,
+                ),
+                itemBuilder: (context, index) => _buildProductCard(_wishlistItems[index]),
+              );
+            },
+          ),
+        ),
+        if (!kIsWeb) CustomerHomeStyles.sizedBoxHeight110,
+      ],
+    );
+  }
+
+  Widget _buildWishlistHeader(String title) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 12.0),
+      child: Row(
+        children: [
+          IconButton(
+            icon: const Icon(Icons.arrow_back, color: Color(0xFF704F38), size: 24),
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(),
+            onPressed: () {
+              setState(() {
+                _selectedIndex = 0;
+              });
+            },
+          ),
+          Expanded(
+            child: Center(
+              child: Text(
+                title,
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 20,
+                  color: Colors.black,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 24),
+        ],
+      ),
+    );
+  }
+
   Widget _buildProductsTab() {
     if (_isSearchingOrFiltering) {
       return Column(
@@ -849,6 +1047,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
             _buildHeaderActionButton(
               icon: Icons.notifications_outlined,
               onPressed: _showNotificationsSheet,
+              showBadge: _hasUnreadNotifications,
             ),
           ],
         ),
@@ -1655,12 +1854,21 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
 
   Widget _buildProductCard(Map<String, dynamic> product) {
     final name = product['product_name'] ?? product['name'] ?? 'Product';
-    final price = product['price']?.toString() ?? '0';
+    final rawPrice = double.tryParse(product['price']?.toString() ?? '0') ?? 0.0;
     final storeName = product['store_name']?.toString() ?? 'Verified Store';
     final images = product['product_images'] as List?;
     final imageSource = (images != null && images.isNotEmpty)
         ? images[0].toString()
         : '';
+    final isFavorited = product['is_favorited'] == 1 || product['is_favorited'] == true;
+
+    // Promotion discount
+    final discountRaw = product['promotion_discount'];
+    final discount = discountRaw != null
+        ? (discountRaw is num ? discountRaw.toDouble() : double.tryParse(discountRaw.toString()))
+        : null;
+    final hasDiscount = discount != null && discount > 0;
+    final discountedPrice = hasDiscount ? rawPrice * (1 - discount! / 100) : null;
 
     return GestureDetector(
       onTap: () async {
@@ -1671,6 +1879,11 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
                 ProductDetailsScreen(product: product, userId: widget.userId),
           ),
         );
+        if (!mounted) return;
+        if (_selectedIndex == 2) {
+          await _loadWishlistItems();
+        }
+        setState(() {});
         _fetchStores();
         _checkCartStatus();
       },
@@ -1707,6 +1920,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
                                     imageSource,
                                     width: double.infinity,
                                     fit: BoxFit.cover,
+                                    alignment: Alignment.topCenter,
                                     errorBuilder:
                                         (context, error, stackTrace) =>
                                             const Center(
@@ -1722,6 +1936,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
                                           imageSource,
                                           width: double.infinity,
                                           fit: BoxFit.cover,
+                                          alignment: Alignment.topCenter,
                                           errorBuilder:
                                               (context, error, stackTrace) =>
                                                   const Center(
@@ -1738,6 +1953,7 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
                                           ),
                                           width: double.infinity,
                                           fit: BoxFit.cover,
+                                          alignment: Alignment.topCenter,
                                           errorBuilder:
                                               (context, error, stackTrace) =>
                                                   const Center(
@@ -1750,16 +1966,44 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
                                         ))),
                     ),
                   ),
+                  // Discount badge (top-left)
+                  if (hasDiscount)
+                    Positioned(
+                      top: 8,
+                      left: 8,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFD4845A),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          '-${discount!.toStringAsFixed(0)}%',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.3,
+                          ),
+                        ),
+                      ),
+                    ),
+                  // Favourite button (top-right)
                   Positioned(
                     top: 8,
                     right: 8,
-                    child: Container(
-                      padding: const EdgeInsets.all(6),
-                      decoration: CustomerHomeStyles.favoriteIconDecoration,
-                      child: const Icon(
-                        Icons.favorite_border,
-                        color: CustomerHomeStyles.primaryColor,
-                        size: CustomerHomeStyles.favoriteIconSize,
+                    child: GestureDetector(
+                      onTap: () async {
+                        await _toggleWishlistItem(product);
+                      },
+                      child: Container(
+                        padding: const EdgeInsets.all(6),
+                        decoration: CustomerHomeStyles.favoriteIconDecoration,
+                        child: Icon(
+                          isFavorited ? Icons.favorite : Icons.favorite_border,
+                          color: CustomerHomeStyles.primaryColor,
+                          size: CustomerHomeStyles.favoriteIconSize,
+                        ),
                       ),
                     ),
                   ),
@@ -1785,11 +2029,38 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
                     style: CustomerHomeStyles.productNameStyle,
                   ),
                   CustomerHomeStyles.sizedBoxHeight8,
-                  Text(
-                    'Rs $price',
-                    style: CustomerHomeStyles.productPriceStyle,
-                    overflow: TextOverflow.ellipsis,
-                  ),
+                  if (hasDiscount)
+                    Row(
+                      children: [
+                        Text(
+                          'Rs ${rawPrice.toStringAsFixed(0)}',
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: Colors.grey,
+                            decoration: TextDecoration.lineThrough,
+                            decorationColor: Colors.grey,
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Flexible(
+                          child: Text(
+                            'Rs ${discountedPrice!.toStringAsFixed(0)}',
+                            style: const TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w700,
+                              color: Color(0xFFD4845A),
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    )
+                  else
+                    Text(
+                      'Rs ${rawPrice.toStringAsFixed(0)}',
+                      style: CustomerHomeStyles.productPriceStyle,
+                      overflow: TextOverflow.ellipsis,
+                    ),
                 ],
               ),
             ),
@@ -1824,28 +2095,28 @@ class _CustomerHomeScreenState extends State<CustomerHomeScreen> {
 
   Widget _buildNavItem(IconData icon, int index) {
     final isSelected = _selectedIndex == index;
-    final isDisabled = index == 2;
 
     return GestureDetector(
-      onTap: isDisabled
-          ? null
-          : () {
-              setState(() {
-                _selectedIndex = index;
-              });
-              if (index == 0 || index == 1) {
-                _fetchStores();
-                _checkCartStatus();
-                _fetchUserData();
-                if (index == 0) _recommendationKey++; 
-                if (index == 1) {
-                  _fetchProducts();
-                }
-              }
-              if (index == 3) {
-                setState(() => _chatRefreshKey++);
-              }
-            },
+      onTap: () {
+        setState(() {
+          _selectedIndex = index;
+        });
+        if (index == 0 || index == 1) {
+          _fetchStores();
+          _checkCartStatus();
+          _fetchUserData();
+          if (index == 0) _recommendationKey++;
+          if (index == 1) {
+            _fetchProducts();
+          }
+        }
+        if (index == 2) {
+          _loadWishlistItems();
+        }
+        if (index == 3) {
+          setState(() => _chatRefreshKey++);
+        }
+      },
       child: Container(
         padding: CustomerHomeStyles.paddingNavContainer,
         decoration: CustomerHomeStyles.navItemActiveDecoration(isSelected),

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'dart:convert';
 import 'dart:io';
 import 'package:image_picker/image_picker.dart';
@@ -26,6 +27,33 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Ticker
   List<Map<String, dynamic>> _allUsers = [];
   List<Map<String, dynamic>> _allProducts = []; 
   List<Map<String, dynamic>> _notifications = [];
+  List<Map<String, dynamic>> _complaints = [];
+  List<Map<String, dynamic>> _complaintFilterOptions = [
+    {'label': 'All', 'value': 'all'},
+    {'label': 'Active', 'value': 'active'},
+    {'label': 'Completed', 'value': 'completed'},
+    {'label': 'Rejected', 'value': 'rejected'},
+  ];
+  String _complaintFilter = 'all';
+  Map<int, Map<String, dynamic>> _complaintDrafts = {};
+  Map<int, TextEditingController> _complaintCommentControllers = {};
+  Map<int, TextEditingController> _complaintRefundControllers = {};
+  Map<int, bool> _savingComplaintIds = {};
+  Map<int, String?> _complaintValidationErrors = {};
+  int get _unreadNotificationCount {
+    return _notifications.where((notification) {
+      final isRead = notification['is_read'];
+      return isRead != 1 && isRead != '1';
+    }).length;
+  }
+
+  int get _activeReviewComplaintsCount {
+    return _complaints.where((complaint) {
+      final status = complaint['status']?.toString().trim().toLowerCase() ?? '';
+      return status == 'active' || status == 'review';
+    }).length;
+  }
+
   Map<String, dynamic>? _userData;
   final ImagePicker _picker = ImagePicker();
 
@@ -49,6 +77,22 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Ticker
 
   static const int _notificationsTabIndex = 8;
   static const int _profileTabIndex = 9;
+  static const int _settingsTabIndex = 11;
+  static const int _sendNotificationTabIndex = 12;
+  static const int _complaintsTabIndex = 13;
+
+  // Send-notification form state
+  final TextEditingController _notifTitleController = TextEditingController();
+  final TextEditingController _notifMessageController = TextEditingController();
+  String _notifTarget = 'all_customers'; // all_customers | all_sellers | all_users | specific_user
+  List<Map<String, dynamic>> _notifSelectedUsers = [];
+  String _notifUserSearchQuery = '';
+  bool _isSendingNotif = false;
+
+  String _language = 'English';
+  String _themeMode = 'Light';
+  final List<String> _languages = ['English'];
+  final List<String> _themeModes = ['Light'];
 
   final List<Map<String, dynamic>> _navItems = [
     {'icon': Icons.dashboard_outlined, 'activeIcon': Icons.dashboard, 'label': 'Dashboard', 'index': 0, 'isParent': false},
@@ -63,7 +107,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Ticker
         {'icon': Icons.verified_user_outlined, 'activeIcon': Icons.verified_user, 'label': 'Verified Users', 'index': 2},
         {'icon': Icons.cancel_outlined, 'activeIcon': Icons.cancel, 'label': 'Rejected Users', 'index': 3},
         {'icon': Icons.block_outlined, 'activeIcon': Icons.block, 'label': 'Blocked Users', 'index': 4},
-        {'icon': Icons.no_accounts_outlined, 'activeIcon': Icons.no_accounts, 'label': 'Deactivated Accounts', 'index': 10},
       ]
     },
     {
@@ -78,13 +121,17 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Ticker
         {'icon': Icons.cancel_outlined, 'activeIcon': Icons.cancel, 'label': 'Rejected Products', 'index': 7},
       ]
     },
+    {'icon': Icons.feedback_outlined, 'activeIcon': Icons.feedback, 'label': 'Complaints', 'index': _complaintsTabIndex, 'isParent': false},
+    {'icon': Icons.send_outlined, 'activeIcon': Icons.send, 'label': 'Send Notification', 'index': _sendNotificationTabIndex, 'isParent': false},
   ];
 
   final List<Map<String, dynamic>> _bottomNavItems = [
     {'icon': Icons.dashboard_outlined, 'activeIcon': Icons.dashboard, 'label': 'Home', 'index': 0},
     {'icon': Icons.account_circle_outlined, 'activeIcon': Icons.account_circle, 'label': 'Accounts', 'index': 1},
     {'icon': Icons.shopping_bag_outlined, 'activeIcon': Icons.shopping_bag, 'label': 'Products', 'index': 5},
+    {'icon': Icons.feedback_outlined, 'activeIcon': Icons.feedback, 'label': 'Complaints', 'index': _complaintsTabIndex},
     {'icon': Icons.notifications_outlined, 'activeIcon': Icons.notifications, 'label': 'Alerts', 'index': 8},
+    {'icon': Icons.settings_outlined, 'activeIcon': Icons.settings, 'label': 'Settings', 'index': _settingsTabIndex},
   ];
 
   late AnimationController _logoutDialogAnimationController;
@@ -137,6 +184,8 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Ticker
     );
 
     _loadData();
+    _loadNotifications();
+    _loadComplaints();
     _setupSocketListener();
   }
 
@@ -154,6 +203,12 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Ticker
     _currentPasswordController.dispose();
     _newPasswordController.dispose();
     _confirmPasswordController.dispose();
+    for (final controller in _complaintCommentControllers.values) {
+      controller.dispose();
+    }
+    for (final controller in _complaintRefundControllers.values) {
+      controller.dispose();
+    }
     super.dispose();
   }
 
@@ -217,6 +272,77 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Ticker
     }
     
     setState(() => _isLoading = false);
+  }
+
+  Future<void> _loadComplaints() async {
+    setState(() => _isLoading = true);
+
+    try {
+      final result = await ApiService.getAllComplaints();
+      if (result['success'] && result['data'] != null) {
+        final complaints = (result['data'] as List<dynamic>)
+            .whereType<Map>()
+            .map((item) => Map<String, dynamic>.from(item))
+            .toList();
+
+        final drafts = <int, Map<String, dynamic>>{};
+        for (final complaint in complaints) {
+          final complaintId = int.tryParse(complaint['complaint_id'].toString());
+          if (complaintId == null) continue;
+          drafts[complaintId] = {
+            'status': (complaint['status'] ?? 'review').toString(),
+            'admin_decision': (complaint['admin_decision'] ?? '').toString(),
+            'admin_verification': (complaint['admin_verification'] ?? '').toString(),
+            'admin_comment': (complaint['admin_comment'] ?? '').toString(),
+            'refund_amount': (complaint['refund_amount'] ?? '0.00').toString(),
+          };
+        }
+
+        setState(() {
+          _complaints = complaints;
+          _complaintDrafts = drafts;
+        });
+
+        for (final complaint in complaints) {
+          final complaintId = int.tryParse(complaint['complaint_id'].toString());
+          if (complaintId == null) continue;
+          final controller = _complaintCommentControllers.putIfAbsent(
+            complaintId,
+            () => TextEditingController(),
+          );
+          final refundController = _complaintRefundControllers.putIfAbsent(
+            complaintId,
+            () => TextEditingController(),
+          );
+          final draft = drafts[complaintId] ?? {};
+          final commentText = draft['admin_comment']?.toString() ?? '';
+          final refundText = draft['refund_amount']?.toString() ?? '0.00';
+          if (controller.text != commentText) {
+            controller.text = commentText;
+          }
+          if (refundController.text != refundText) {
+            refundController.text = refundText;
+          }
+        }
+      } else {
+        setState(() {
+          _complaints = [];
+          _complaintDrafts = {};
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        _showSnackBar('Failed to load complaints', AdminDashboardStyles.errorColor);
+      }
+      setState(() {
+        _complaints = [];
+        _complaintDrafts = {};
+      });
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
   }
 
   Future<void> _loadNotifications() async {
@@ -575,11 +701,35 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Ticker
       return;
     }
 
+    if (index == _complaintsTabIndex) {
+      setState(() {
+        _selectedTab = index;
+      });
+      _loadComplaints();
+      return;
+    }
+
     if (index == _profileTabIndex) {
       setState(() {
         _selectedTab = index;
       });
       _loadUserData();
+      return;
+    }
+
+    if (index == _settingsTabIndex) {
+      setState(() {
+        _selectedTab = index;
+      });
+      return;
+    }
+
+    if (index == _sendNotificationTabIndex) {
+      // Ensure user list is loaded so the specific-user picker works
+      if (_allUsers.isEmpty) _loadData();
+      setState(() {
+        _selectedTab = index;
+      });
       return;
     }
     
@@ -2089,6 +2239,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Ticker
                         title: item['label'] as String,
                         index: item['index'] as int,
                         isParent: false,
+                        unreadCount: item['index'] == _complaintsTabIndex ? _activeReviewComplaintsCount : 0,
                       ),
                     ];
                   }
@@ -2106,6 +2257,15 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Ticker
                     title: 'Notification',
                     onTap: () => _onTabChanged(_notificationsTabIndex),
                     isSelected: _selectedTab == _notificationsTabIndex,
+                    unreadCount: _unreadNotificationCount,
+                  ),
+                  AdminDashboardStyles.vSpaceLarge,
+                  _buildSidebarBottomItem(
+                    icon: Icons.settings_outlined,
+                    activeIcon: Icons.settings,
+                    title: 'Settings',
+                    onTap: () => _onTabChanged(_settingsTabIndex),
+                    isSelected: _selectedTab == _settingsTabIndex,
                   ),
                   AdminDashboardStyles.vSpaceLarge,
                   _buildSidebarBottomItem(
@@ -2132,6 +2292,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Ticker
     List<Map<String, dynamic>>? subItems,
     bool isAccounts = false,
     bool isProducts = false,
+    int unreadCount = 0,
   }) {
     final isSelected = _selectedTab == index;
     final hasSelectedSubItem = isParent && subItems != null && subItems.any((sub) => sub['index'] == _selectedTab);
@@ -2170,10 +2331,33 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Ticker
                     ),
                     AdminDashboardStyles.hSpaceMedium,
                     Expanded(
-                      child: Text(
-                        title,
-                        style: AdminDashboardStyles.sidebarNavItemTextStyle(isSelected, hasSelectedSubItem),
-                        overflow: TextOverflow.ellipsis,
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              title,
+                              style: AdminDashboardStyles.sidebarNavItemTextStyle(isSelected, hasSelectedSubItem),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          if (unreadCount > 0)
+                            Container(
+                              margin: const EdgeInsets.only(left: 8),
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: AdminDashboardStyles.primaryColor,
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Text(
+                                unreadCount > 99 ? '99+' : unreadCount.toString(),
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                        ],
                       ),
                     ),
                     if (isParent && _isSidebarHovered)
@@ -2184,12 +2368,35 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Ticker
                       ),
                   ],
                 )
-              : Center(
-                  child: Icon(
-                    isSelected || hasSelectedSubItem ? activeIcon : icon,
-                    color: (isSelected || hasSelectedSubItem) ? AdminDashboardStyles.primaryColor : AdminDashboardStyles.secondaryTextColor,
-                    size: 22,
-                  ),
+              : Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    Icon(
+                      isSelected || hasSelectedSubItem ? activeIcon : icon,
+                      color: (isSelected || hasSelectedSubItem) ? AdminDashboardStyles.primaryColor : AdminDashboardStyles.secondaryTextColor,
+                      size: 22,
+                    ),
+                    if (unreadCount > 0)
+                      Positioned(
+                        right: 0,
+                        top: 0,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: AdminDashboardStyles.primaryColor,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(
+                            unreadCount > 99 ? '99+' : unreadCount.toString(),
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
         ),
       ),
@@ -2244,6 +2451,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Ticker
     required IconData activeIcon,
     required String title,
     required VoidCallback onTap,
+    int unreadCount = 0,
     bool isLogout = false,
     bool isSelected = false,
   }) {
@@ -2269,17 +2477,40 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Ticker
             ),
             AdminDashboardStyles.hSpaceMedium,
                     Expanded(
-                      child: Text(
-              title,
-              style: AdminDashboardStyles.sidebarNavItemTextStyle(isSelected, false).copyWith(
-                color: isSelected 
-                    ? AdminDashboardStyles.primaryColor 
-                    : (isLogout ? AdminDashboardStyles.errorColor : AdminDashboardStyles.textColor),
-              ),
-                        overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ],
+                      child: Row(
+                        children: [ 
+                          Expanded(
+                            child: Text(
+                              title,
+                              style: AdminDashboardStyles.sidebarNavItemTextStyle(isSelected, false).copyWith(
+                                color: isSelected 
+                                    ? AdminDashboardStyles.primaryColor 
+                                    : (isLogout ? AdminDashboardStyles.errorColor : AdminDashboardStyles.textColor),
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          if (unreadCount > 0)
+                            Container(
+                              margin: const EdgeInsets.only(left: 8),
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: AdminDashboardStyles.primaryColor,
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Text(
+                                unreadCount > 99 ? '99+' : unreadCount.toString(),
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ],
                 )
               : Center(
                   child: Icon(
@@ -2330,7 +2561,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Ticker
           
           Expanded(
             flex: isMobile ? 2 : 3,
-            child: _selectedTab >= 1 && _selectedTab <= 7 
+            child: (_selectedTab >= 1 && _selectedTab <= 7) || _selectedTab == _complaintsTabIndex
               ? Center(
                 child: Container(
                   constraints: BoxConstraints(
@@ -2443,7 +2674,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Ticker
           onPressed: () => Scaffold.of(context).openDrawer(),
         ),
       ),
-      title: (_selectedTab >= 1 && _selectedTab <= 7) 
+      title: (_selectedTab >= 1 && _selectedTab <= 7) || _selectedTab == _complaintsTabIndex
         ? Container(
             constraints: const BoxConstraints(maxWidth: 300),
             child: TextField(
@@ -2641,9 +2872,24 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Ticker
                   ],
                 ),
                 _buildDrawerNavItem(
+                  icon: Icons.feedback_outlined,
+                  title: 'Complaints',
+                  index: _complaintsTabIndex,
+                ),
+                _buildDrawerNavItem(
                   icon: Icons.notifications_none_outlined,
                   title: 'Notification',
                   index: _notificationsTabIndex,
+                ),
+                _buildDrawerNavItem(
+                  icon: Icons.send_outlined,
+                  title: 'Send Notification',
+                  index: _sendNotificationTabIndex,
+                ),
+                _buildDrawerNavItem(
+                  icon: Icons.settings_outlined,
+                  title: 'Settings',
+                  index: _settingsTabIndex,
                 ),
               ],
             ),
@@ -2726,20 +2972,65 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Ticker
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       
-                      AnimatedContainer(
-                        duration: const Duration(milliseconds: 200),
-                        curve: Curves.easeInOut,
-                        width: 44,
-                        height: 44,
-                        decoration: AdminDashboardStyles.bottomNavItemDecoration(isSelected),
-                        child: Icon(
-                          isSelected 
-                              ? (item['activeIcon'] ?? item['icon']) as IconData
-                              : item['icon'] as IconData,
-                          color: isSelected ? AdminDashboardStyles.primaryColor : AdminDashboardStyles.surfaceColor.withOpacity(0.7),
-                          size: 24,
+                      Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        AnimatedContainer(
+                          duration: const Duration(milliseconds: 200),
+                          curve: Curves.easeInOut,
+                          width: 44,
+                          height: 44,
+                          decoration: AdminDashboardStyles.bottomNavItemDecoration(isSelected),
+                          child: Icon(
+                            isSelected 
+                                ? (item['activeIcon'] ?? item['icon']) as IconData
+                                : item['icon'] as IconData,
+                            color: isSelected ? AdminDashboardStyles.primaryColor : AdminDashboardStyles.surfaceColor.withOpacity(0.7),
+                            size: 24,
+                          ),
                         ),
-                      ),
+                        if (targetIndex == _notificationsTabIndex && _unreadNotificationCount > 0)
+                          Positioned(
+                            right: 2,
+                            top: 2,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: Colors.redAccent,
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Text(
+                                _unreadNotificationCount > 99 ? '99+' : _unreadNotificationCount.toString(),
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                          ),
+                        if (targetIndex == _complaintsTabIndex && _activeReviewComplaintsCount > 0)
+                          Positioned(
+                            right: 2,
+                            top: 2,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: Colors.redAccent,
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Text(
+                                _activeReviewComplaintsCount > 99 ? '99+' : _activeReviewComplaintsCount.toString(),
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
                       if (!isSelected)
                         Padding(
                           padding: const EdgeInsets.only(top: 2),
@@ -2779,8 +3070,14 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Ticker
         return 'Rejected Products';
       case _notificationsTabIndex:
         return 'Notifications';
+      case _settingsTabIndex:
+        return 'Settings';
       case _profileTabIndex:
         return 'Admin Profile';
+      case _sendNotificationTabIndex:
+        return 'Send Notification';
+      case _complaintsTabIndex:
+        return 'Complaints';
       default:
         return 'Dashboard';
     }
@@ -2812,13 +3109,796 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Ticker
         return _buildApprovedProductsView();
       case 7:
         return _buildRejectedProductsView();
+      case _complaintsTabIndex:
+        return _buildComplaintsView();
       case _notificationsTabIndex:
         return _buildNotificationsView();
+      case _settingsTabIndex:
+        return _buildSettingsView();
       case _profileTabIndex:
         return _buildAdminProfileView();
+      case _sendNotificationTabIndex:
+        return _buildSendNotificationView();
       default:
         return _buildDashboardView();
     }
+  }
+
+  Widget _buildSendNotificationView() {
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isMobile = screenWidth < 768;
+
+    // ── Seller-dashboard colour tokens ────────────────────────────────────
+    const Color brownColor      = Color(0xFF704F38);
+    const Color lightGray       = Color(0xFF797979);
+    const Color darkText        = Color(0xFF000000);
+    const Color beigeBackground = Color(0xFFF5F1EB);
+    const Color whiteColor      = Colors.white;
+
+    final audiences = [
+      {'value': 'all_customers', 'label': 'All Customers', 'icon': Icons.people_outline},
+      {'value': 'all_sellers',   'label': 'All Sellers',   'icon': Icons.store_outlined},
+      {'value': 'all_users',     'label': 'All Users',     'icon': Icons.groups_outlined},
+      {'value': 'specific_user', 'label': 'Specific User', 'icon': Icons.person_search_outlined},
+    ];
+
+    final filteredUsers = _notifUserSearchQuery.isEmpty
+        ? _allUsers
+        : _allUsers.where((u) {
+            final name  = (u['name']  ?? '').toString().toLowerCase();
+            final email = (u['email'] ?? '').toString().toLowerCase();
+            return name.contains(_notifUserSearchQuery) || email.contains(_notifUserSearchQuery);
+          }).toList();
+
+    Widget buildField({
+      required String label,
+      required TextEditingController controller,
+      String? hint,
+      int maxLines = 1,
+      TextInputType? keyboardType,
+    }) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: isMobile ? 13 : 14,
+              fontWeight: FontWeight.w600,
+              color: darkText,
+            ),
+          ),
+          const SizedBox(height: 8),
+          TextField(
+            controller: controller,
+            maxLines: maxLines,
+            keyboardType: keyboardType,
+            style: const TextStyle(fontSize: 14),
+            decoration: InputDecoration(
+              hintText: hint,
+              hintStyle: TextStyle(color: lightGray.withOpacity(0.6)),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide(color: lightGray.withOpacity(0.3)),
+              ),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide(color: lightGray.withOpacity(0.3)),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: const BorderSide(color: brownColor, width: 2),
+              ),
+              contentPadding: EdgeInsets.symmetric(
+                horizontal: 16,
+                vertical: maxLines > 1 ? 16 : isMobile ? 14 : 16,
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+
+    Widget formPanel = Container(
+      padding: EdgeInsets.all(isMobile ? 20 : 32),
+      decoration: BoxDecoration(
+        color: whiteColor,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 10,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Notification Details',
+            style: TextStyle(
+              fontSize: isMobile ? 20 : 24,
+              fontWeight: FontWeight.bold,
+              color: darkText,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Compose and broadcast a notification to your users',
+            style: TextStyle(
+              fontSize: isMobile ? 13 : 14,
+              color: lightGray,
+            ),
+          ),
+          SizedBox(height: isMobile ? 24 : 32),
+
+          buildField(
+            label: 'Notification Title',
+            controller: _notifTitleController,
+            hint: 'e.g. New Arrivals This Week!',
+          ),
+          SizedBox(height: isMobile ? 20 : 24),
+
+          buildField(
+            label: 'Message',
+            controller: _notifMessageController,
+            hint: 'Write your notification message here…',
+            maxLines: 5,
+          ),
+          SizedBox(height: isMobile ? 24 : 32),
+
+          Text(
+            'Send To',
+            style: TextStyle(
+              fontSize: isMobile ? 13 : 14,
+              fontWeight: FontWeight.w600,
+              color: darkText,
+            ),
+          ),
+          const SizedBox(height: 12),
+
+          ...audiences.map((opt) {
+            final val      = opt['value'] as String;
+            final lbl      = opt['label'] as String;
+            final ico      = opt['icon']  as IconData;
+            final selected = _notifTarget == val;
+            return GestureDetector(
+              onTap: () {
+                setState(() {
+                  _notifTarget = val;
+                  if (val != 'specific_user') _notifSelectedUsers.clear();
+                });
+              },
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 160),
+                margin: const EdgeInsets.only(bottom: 10),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                decoration: BoxDecoration(
+                  color: selected ? brownColor.withOpacity(0.06) : whiteColor,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: selected ? brownColor : lightGray.withOpacity(0.3),
+                    width: selected ? 2 : 1,
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Icon(ico, size: 20, color: selected ? brownColor : lightGray),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        lbl,
+                        style: TextStyle(
+                          fontSize: isMobile ? 14 : 15,
+                          fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                          color: selected ? brownColor : darkText,
+                        ),
+                      ),
+                    ),
+                    AnimatedContainer(
+                      duration: const Duration(milliseconds: 160),
+                      width: 20,
+                      height: 20,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: selected ? brownColor : Colors.transparent,
+                        border: Border.all(
+                          color: selected ? brownColor : lightGray.withOpacity(0.4),
+                          width: 2,
+                        ),
+                      ),
+                      child: selected
+                          ? const Icon(Icons.check, size: 12, color: Colors.white)
+                          : null,
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }),
+
+          if (_notifTarget == 'specific_user') ...[
+            SizedBox(height: isMobile ? 20 : 24),
+            Text(
+              'Choose Users',
+              style: TextStyle(
+                fontSize: isMobile ? 13 : 14,
+                fontWeight: FontWeight.w600,
+                color: darkText,
+              ),
+            ),
+            const SizedBox(height: 8),
+
+            TextField(
+              onChanged: (v) => setState(() => _notifUserSearchQuery = v.toLowerCase()),
+              style: const TextStyle(fontSize: 14),
+              decoration: InputDecoration(
+                hintText: 'Search by name or email…',
+                hintStyle: TextStyle(color: lightGray.withOpacity(0.6)),
+                prefixIcon: Icon(Icons.search, color: lightGray, size: 20),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: lightGray.withOpacity(0.3)),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: lightGray.withOpacity(0.3)),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: brownColor, width: 2),
+                ),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+              ),
+            ),
+            const SizedBox(height: 10),
+
+            if (_notifSelectedUsers.isNotEmpty)
+              Container(
+                margin: const EdgeInsets.only(bottom: 10),
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: brownColor.withOpacity(0.06),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: brownColor.withOpacity(0.3)),
+                ),
+                child: Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: _notifSelectedUsers.map((u) {
+                    return Chip(
+                      backgroundColor: brownColor.withOpacity(0.12),
+                      side: BorderSide.none,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      label: Text(
+                        u['name'] ?? 'User',
+                        style: const TextStyle(fontSize: 12, color: brownColor, fontWeight: FontWeight.w600),
+                      ),
+                      deleteIcon: const Icon(Icons.close, size: 14, color: brownColor),
+                      onDeleted: () {
+                        setState(() {
+                          _notifSelectedUsers.removeWhere((item) => item['user_id'] == u['user_id']);
+                        });
+                      },
+                    );
+                  }).toList(),
+                ),
+              ),
+
+            Container(
+              constraints: const BoxConstraints(maxHeight: 140),
+              decoration: BoxDecoration(
+                color: whiteColor,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: lightGray.withOpacity(0.25)),
+              ),
+              child: filteredUsers.isEmpty
+                  ? Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Center(
+                        child: Text('No users found', style: TextStyle(color: lightGray)),
+                      ),
+                    )
+                  : ListView.separated(
+                      shrinkWrap: true,
+                      itemCount: filteredUsers.length,
+                      separatorBuilder: (_, __) => Divider(height: 1, color: lightGray.withOpacity(0.15)),
+                      itemBuilder: (context, i) {
+                        final user     = filteredUsers[i];
+                        final isChosen = _notifSelectedUsers.any((item) => item['user_id'] == user['user_id']);
+                        final role     = (user['role'] ?? '').toString().toLowerCase();
+                        return ListTile(
+                          dense: true,
+                          selected: isChosen,
+                          selectedTileColor: brownColor.withOpacity(0.06),
+                          leading: CircleAvatar(
+                            radius: 18,
+                            backgroundColor: brownColor.withOpacity(0.12),
+                            child: Text(
+                              (user['name'] ?? 'U').toString().isNotEmpty
+                                  ? (user['name'] ?? 'U').toString()[0].toUpperCase()
+                                  : 'U',
+                              style: TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.bold,
+                                color: brownColor,
+                              ),
+                            ),
+                          ),
+                          title: Text(
+                            user['name']?.toString() ?? 'Unknown',
+                            style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: isChosen ? FontWeight.w700 : FontWeight.w500,
+                              color: darkText,
+                            ),
+                          ),
+                          subtitle: Text(
+                            user['email']?.toString() ?? '',
+                            style: TextStyle(fontSize: 12, color: lightGray),
+                          ),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                decoration: BoxDecoration(
+                                  color: lightGray.withOpacity(0.12),
+                                  borderRadius: BorderRadius.circular(6),
+                                ),
+                                child: Text(
+                                  role.toUpperCase(),
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w700,
+                                    color: lightGray,
+                                  ),
+                                ),
+                              ),
+                              if (isChosen) ...[
+                                const SizedBox(width: 6),
+                                Icon(Icons.check_circle, color: brownColor, size: 18),
+                              ],
+                            ],
+                          ),
+                          onTap: () {
+                            setState(() {
+                              if (isChosen) {
+                                _notifSelectedUsers.removeWhere((item) => item['user_id'] == user['user_id']);
+                              } else {
+                                _notifSelectedUsers.add(user);
+                              }
+                            });
+                          },
+                        );
+                      },
+                    ),
+            ),
+          ],
+
+          const SizedBox(height: 8),
+        ],
+      ),
+    );
+
+    Widget sidebarPanel = SizedBox(
+      width: isMobile ? double.infinity : 300,
+      child: Column(
+        children: [
+          Container(
+            padding: EdgeInsets.all(isMobile ? 16 : 20),
+            decoration: BoxDecoration(
+              color: whiteColor,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: lightGray.withOpacity(0.2)),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.04),
+                  blurRadius: 8,
+                  offset: const Offset(0, 2),
+                ),
+              ],
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Preview',
+                  style: TextStyle(
+                    fontSize: isMobile ? 15 : 16,
+                    fontWeight: FontWeight.w600,
+                    color: darkText,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: beigeBackground,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: lightGray.withOpacity(0.2)),
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Container(
+                        width: 36,
+                        height: 36,
+                        decoration: BoxDecoration(
+                          color: brownColor.withOpacity(0.15),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Icon(Icons.campaign_outlined, color: brownColor, size: 20),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            ValueListenableBuilder<TextEditingValue>(
+                              valueListenable: _notifTitleController,
+                              builder: (_, v, __) => Text(
+                                v.text.isEmpty ? 'Notification Title' : v.text,
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w700,
+                                  color: v.text.isEmpty ? lightGray : darkText,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            const SizedBox(height: 3),
+                            ValueListenableBuilder<TextEditingValue>(
+                              valueListenable: _notifMessageController,
+                              builder: (_, v, __) => Text(
+                                v.text.isEmpty ? 'Your message will appear here…' : v.text,
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: v.text.isEmpty ? lightGray.withOpacity(0.6) : lightGray,
+                                  height: 1.4,
+                                ),
+                                maxLines: 3,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Icon(Icons.groups_outlined, size: 16, color: lightGray),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        _notifTarget == 'all_customers' ? 'All Customers'
+                            : _notifTarget == 'all_sellers' ? 'All Sellers'
+                            : _notifTarget == 'all_users' ? 'All Users'
+                            : _notifSelectedUsers.isNotEmpty
+                                ? _notifSelectedUsers.map((u) => u['name'] ?? 'User').join(', ')
+                                : 'Select user(s)…',
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: lightGray,
+                          fontWeight: FontWeight.w500,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(height: 16),
+
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton(
+              onPressed: _isSendingNotif
+                  ? null
+                  : () async {
+                      final title   = _notifTitleController.text.trim();
+                      final message = _notifMessageController.text.trim();
+
+                      if (title.isEmpty) {
+                        _showSnackBar('Please enter a notification title', AdminDashboardStyles.errorColor);
+                        return;
+                      }
+                      
+                      // Title Word count validation: < 20 words or numbers
+                      final titleWordCount = title.split(RegExp(r'\s+')).where((word) => word.isNotEmpty).length;
+                      if (titleWordCount >= 20) {
+                        _showSnackBar('Title must be less than 20 words/numbers (current: $titleWordCount)', AdminDashboardStyles.errorColor);
+                        return;
+                      }
+
+                      if (message.isEmpty) {
+                        _showSnackBar('Please enter a notification message', AdminDashboardStyles.errorColor);
+                        return;
+                      }
+
+                      // Message Word count validation: < 50 words or numbers
+                      final msgWordCount = message.split(RegExp(r'\s+')).where((word) => word.isNotEmpty).length;
+                      if (msgWordCount >= 50) {
+                        _showSnackBar('Message must be less than 50 words (current: $msgWordCount)', AdminDashboardStyles.errorColor);
+                        return;
+                      }
+
+                      if (_notifTarget == 'specific_user' && _notifSelectedUsers.isEmpty) {
+                        _showSnackBar('Please select at least one user to send to', AdminDashboardStyles.errorColor);
+                        return;
+                      }
+
+                      setState(() => _isSendingNotif = true);
+
+                      final userIds = _notifTarget == 'specific_user'
+                          ? _notifSelectedUsers.map((u) => u['user_id'] as int).toList()
+                          : null;
+
+                      final result = await ApiService.sendAdminNotification(
+                        title: title,
+                        message: message,
+                        target: _notifTarget,
+                        userIds: userIds,
+                      );
+
+                      setState(() => _isSendingNotif = false);
+
+                      if (result['success']) {
+                        _notifTitleController.clear();
+                        _notifMessageController.clear();
+                        setState(() {
+                          _notifSelectedUsers.clear();
+                          _notifTarget          = 'all_customers';
+                          _notifUserSearchQuery = '';
+                        });
+                      } else {
+                        _showSnackBar(
+                          result['message'] ?? 'Failed to send notification',
+                          AdminDashboardStyles.errorColor,
+                        );
+                      }
+                    },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: brownColor,
+                disabledBackgroundColor: brownColor.withOpacity(0.5),
+                padding: EdgeInsets.symmetric(vertical: isMobile ? 16 : 18),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                elevation: 0,
+              ),
+              child: _isSendingNotif
+                  ? const SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2.5),
+                    )
+                  : Text(
+                      'Send Notification',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: isMobile ? 16 : 18,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+            ),
+          ),
+
+          const SizedBox(height: 12),
+
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton(
+              onPressed: () {
+                _notifTitleController.clear();
+                _notifMessageController.clear();
+                setState(() {
+                  _notifSelectedUsers.clear();
+                  _notifTarget          = 'all_customers';
+                  _notifUserSearchQuery = '';
+                });
+              },
+              style: OutlinedButton.styleFrom(
+                side: BorderSide(color: brownColor, width: 1.5),
+                padding: EdgeInsets.symmetric(vertical: isMobile ? 16 : 18),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+              child: Text(
+                'Clear Form',
+                style: TextStyle(
+                  color: brownColor,
+                  fontSize: isMobile ? 16 : 18,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    return Container(
+      padding: EdgeInsets.all(isMobile ? 16 : 24),
+      color: beigeBackground,
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 1400),
+          child: SingleChildScrollView(
+            child: isMobile
+                ? Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      formPanel,
+                      const SizedBox(height: 20),
+                      sidebarPanel,
+                    ],
+                  )
+                : Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(flex: 2, child: formPanel),
+                      const SizedBox(width: 24),
+                      sidebarPanel,
+                    ],
+                  ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSettingsView() {
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isMobile = screenWidth < 768;
+
+    return Container(
+      color: AdminDashboardStyles.backgroundColor,
+      child: SingleChildScrollView(
+        padding: EdgeInsets.symmetric(horizontal: isMobile ? 16 : 24, vertical: isMobile ? 20 : 24),
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 1200),
+            child: Container(
+              decoration: BoxDecoration(
+                color: AdminDashboardStyles.surfaceColor,
+                borderRadius: BorderRadius.circular(24),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.05),
+                    blurRadius: 30,
+                    offset: const Offset(0, 10),
+                  ),
+                ],
+              ),
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Preferences',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: AdminDashboardStyles.textColor,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Container(
+                    decoration: BoxDecoration(
+                      color: AdminDashboardStyles.backgroundColor,
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: AdminDashboardStyles.dividerColor),
+                    ),
+                    child: Column(
+                      children: [
+                        _buildDropdownRow(
+                          label: 'Language',
+                          value: _language,
+                          items: _languages,
+                          onChanged: (value) {
+                            if (value != null) {
+                              setState(() => _language = value);
+                            }
+                          },
+                        ),
+                        _buildDivider(),
+                        _buildDropdownRow(
+                          label: 'Theme',
+                          value: _themeMode,
+                          items: _themeModes,
+                          onChanged: (value) {
+                            if (value != null) {
+                              setState(() => _themeMode = value);
+                            }
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 28),
+                  const Text(
+                    'Account',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: AdminDashboardStyles.textColor,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Container(
+                    decoration: BoxDecoration(
+                      color: AdminDashboardStyles.backgroundColor,
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: AdminDashboardStyles.dividerColor),
+                    ),
+                    child: ListTile(
+                      leading: const Icon(Icons.lock_outline, color: AdminDashboardStyles.primaryColor),
+                      title: const Text('Change password'),
+                      trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+                      onTap: _showChangePasswordDialog,
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDropdownRow({
+    required String label,
+    required String value,
+    required List<String> items,
+    required ValueChanged<String?>? onChanged,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 12.0),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              label,
+              style: const TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+                color: AdminDashboardStyles.textColor,
+              ),
+            ),
+          ),
+          DropdownButton<String>(
+            value: value,
+            underline: const SizedBox.shrink(),
+            icon: const Icon(Icons.keyboard_arrow_down, color: AdminDashboardStyles.textColor),
+            items: items
+                .map(
+                  (item) => DropdownMenuItem(
+                    value: item,
+                    child: Text(
+                      item,
+                      style: const TextStyle(color: AdminDashboardStyles.textColor),
+                    ),
+                  ),
+                )
+                .toList(),
+            onChanged: items.length > 1 ? onChanged : null,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDivider() {
+    return const Divider(color: Colors.transparent, height: 0);
   }
 
   Widget _buildDashboardView() {
@@ -3563,6 +4643,1085 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Ticker
       padding: AdminDashboardStyles.screenPadding,
       child: _buildProductList(_getFilteredProducts(), 'rejected'),
     );
+  }
+
+  Widget _buildComplaintsView() {
+    return Container(
+      padding: AdminDashboardStyles.screenPadding,
+      child: Column(
+        children: [
+          _buildComplaintFilter(),
+          Expanded(child: _buildComplaintsList(_getFilteredComplaints())),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildComplaintFilter() {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.end,
+        children: [
+          _buildComplaintFilterChip('All', 'all'),
+          AdminDashboardStyles.hSpaceSmall,
+          _buildComplaintFilterChip('Active', 'active'),
+          AdminDashboardStyles.hSpaceSmall,
+          _buildComplaintFilterChip('Completed', 'completed'),
+          AdminDashboardStyles.hSpaceSmall,
+          _buildComplaintFilterChip('Rejected', 'rejected'),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildComplaintFilterChip(String label, String value) {
+    final isSelected = _complaintFilter == value;
+    return GestureDetector(
+      onTap: () {
+        setState(() {
+          _complaintFilter = value;
+        });
+      },
+      child: AnimatedContainer(
+        duration: AdminDashboardStyles.fastAnimationDuration,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        decoration: AdminDashboardStyles.filterChipDecoration(isSelected),
+        child: Text(
+          label,
+          style: AdminDashboardStyles.filterChipTextStyle(isSelected),
+        ),
+      ),
+    );
+  }
+
+  List<Map<String, dynamic>> _getFilteredComplaints() {
+    final query = _searchController.text.toLowerCase();
+    final normalizedComplaints = _complaints.where((complaint) {
+      final status = (complaint['status'] ?? 'review').toString().toLowerCase();
+      final matchesFilter = _complaintFilter == 'all'
+          ? true
+          : _complaintFilter == 'active'
+              ? status == 'review' || status == 'active'
+              : status == _complaintFilter;
+
+      if (!matchesFilter) return false;
+      if (query.isEmpty) return true;
+
+      final customerName = (complaint['customer_name'] ?? '').toString().toLowerCase();
+      final productName = (complaint['product_name'] ?? '').toString().toLowerCase();
+      final issue = (complaint['issue'] ?? '').toString().toLowerCase();
+      final description = (complaint['description'] ?? '').toString().toLowerCase();
+      final type = (complaint['type'] ?? '').toString().toLowerCase();
+      return customerName.contains(query) ||
+          productName.contains(query) ||
+          issue.contains(query) ||
+          description.contains(query) ||
+          type.contains(query);
+    }).toList();
+
+    final filteredComplaints = List<Map<String, dynamic>>.from(normalizedComplaints)
+      ..sort((a, b) {
+        final dateA = DateTime.tryParse((a['created_at'] ?? '').toString()) ?? DateTime.fromMillisecondsSinceEpoch(0);
+        final dateB = DateTime.tryParse((b['created_at'] ?? '').toString()) ?? DateTime.fromMillisecondsSinceEpoch(0);
+        return dateB.compareTo(dateA);
+      });
+
+    return filteredComplaints;
+  }
+
+  Widget _buildComplaintsList(List<Map<String, dynamic>> complaints) {
+    if (complaints.isEmpty) {
+      final query = _searchController.text.toLowerCase();
+      final emptyMessage = query.isEmpty
+          ? (_complaintFilter == 'all' ? 'No complaints yet' : 'No complaints match this filter')
+          : 'No matching complaints';
+      return _buildEmptyState(icon: Icons.feedback_outlined, message: emptyMessage);
+    }
+
+    return ListView.builder(
+      itemCount: complaints.length,
+      itemBuilder: (context, index) {
+        final complaint = complaints[index];
+        return _buildComplaintCard(
+          complaint: complaint,
+          onDetails: () => _showComplaintReviewDialog(complaint),
+        );
+      },
+    );
+  }
+
+  Widget _buildComplaintCard({
+    required Map<String, dynamic> complaint,
+    VoidCallback? onDetails,
+  }) {
+    final complaintId = complaint['complaint_id']?.toString() ?? 'N/A';
+    final productName = complaint['product_name']?.toString() ?? 'Unknown Product';
+    final storeName = complaint['store_name']?.toString() ?? 'Unknown Store';
+    final customerName = complaint['customer_name']?.toString() ?? 'Unknown Customer';
+    final status = (complaint['status'] ?? 'review').toString().toLowerCase();
+    final statusLabel = status == 'completed'
+        ? 'Completed'
+        : status == 'rejected'
+            ? 'Rejected'
+            : status == 'active'
+                ? 'Active'
+                : 'Review';
+
+    Color statusColor = Colors.orange;
+    if (status == 'completed') statusColor = Colors.green;
+    if (status == 'rejected') statusColor = Colors.red;
+    if (status == 'active') statusColor = Colors.blue;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      decoration: BoxDecoration(
+        color: AdminDashboardStyles.surfaceColor,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 10,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 56,
+                  height: 56,
+                  decoration: AdminDashboardStyles.imageBackgroundDecoration.copyWith(
+                    color: AdminDashboardStyles.backgroundColor,
+                  ),
+                  child: Icon(
+                    Icons.feedback_outlined,
+                    color: AdminDashboardStyles.primaryColor,
+                    size: 28,
+                  ),
+                ),
+                AdminDashboardStyles.hSpaceLarge,
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              '#$complaintId • $productName',
+                              style: AdminDashboardStyles.cardNameStyle.copyWith(
+                                fontSize: 18,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Row(
+                        children: [
+                          Icon(Icons.store, size: 14, color: AdminDashboardStyles.secondaryTextColor),
+                          AdminDashboardStyles.hSpaceTiny,
+                          Text(
+                            storeName,
+                            style: AdminDashboardStyles.headerSubtitleStyle.copyWith(
+                              color: AdminDashboardStyles.secondaryTextColor,
+                            ),
+                          ),
+                          Text(
+                            ' • ',
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: AdminDashboardStyles.secondaryTextColor,
+                            ),
+                          ),
+                          Expanded(
+                            child: Text(
+                              customerName,
+                              style: TextStyle(
+                                fontSize: 14,
+                                color: AdminDashboardStyles.secondaryTextColor,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: statusColor.withOpacity(0.12),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: statusColor.withOpacity(0.3)),
+                  ),
+                  child: Text(
+                    statusLabel.toUpperCase(),
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      color: statusColor,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            AdminDashboardStyles.vSpaceLarge,
+            Divider(color: AdminDashboardStyles.secondaryTextColor.withOpacity(0.2)),
+            AdminDashboardStyles.vSpaceMedium,
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: onDetails,
+                  icon: Icon(Icons.info_outline, size: 16, color: AdminDashboardStyles.primaryColor),
+                  label: Text('Review', style: TextStyle(color: AdminDashboardStyles.primaryColor, fontSize: 12)),
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 22),
+                    minimumSize: const Size(0, 56),
+                    side: BorderSide(color: AdminDashboardStyles.primaryColor, width: 1),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildComplaintMetaChip(IconData icon, String label) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF7EFE6),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 13, color: AdminDashboardStyles.primaryColor),
+          const SizedBox(width: 6),
+          Text(label, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600)),
+        ],
+      ),
+    );
+  }
+
+  List<String> _getComplaintImages(dynamic imagesData) {
+    if (imagesData == null) return [];
+    if (imagesData is List) {
+      return imagesData.whereType<String>().where((item) => item.isNotEmpty).toList();
+    }
+    final raw = imagesData.toString().trim();
+    if (raw.isEmpty) return [];
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is List) {
+        return decoded.whereType<String>().where((item) => item.isNotEmpty).toList();
+      }
+    } catch (_) {}
+    return raw.split(',').where((item) => item.trim().isNotEmpty).toList();
+  }
+
+  Widget _buildComplaintImage(String? imageSource, {double width = 84, double height = 84}) {
+    if (imageSource == null || imageSource.isEmpty) {
+      return Container(
+        width: width,
+        height: height,
+        decoration: BoxDecoration(
+          color: const Color(0xFFF7EFE6),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: const Icon(Icons.image_not_supported_outlined, color: Color(0xFF704F38)),
+      );
+    }
+
+    final normalized = imageSource.trim();
+    if (normalized.startsWith('http')) {
+      return Image.network(
+        normalized,
+        width: width,
+        height: height,
+        fit: BoxFit.cover,
+        errorBuilder: (context, error, stackTrace) => Container(
+          width: width,
+          height: height,
+          decoration: BoxDecoration(
+            color: const Color(0xFFF7EFE6),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: const Icon(Icons.broken_image_outlined, color: Color(0xFF704F38)),
+        ),
+      );
+    }
+
+    try {
+      final cleanBase64 = normalized.contains(',') ? normalized.split(',').last : normalized;
+      return Image.memory(
+        base64Decode(cleanBase64),
+        width: width,
+        height: height,
+        fit: BoxFit.cover,
+        errorBuilder: (context, error, stackTrace) => Container(
+          width: width,
+          height: height,
+          decoration: BoxDecoration(
+            color: const Color(0xFFF7EFE6),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: const Icon(Icons.broken_image_outlined, color: Color(0xFF704F38)),
+        ),
+      );
+    } catch (_) {
+      return Container(
+        width: width,
+        height: height,
+        decoration: BoxDecoration(
+          color: const Color(0xFFF7EFE6),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: const Icon(Icons.image_not_supported_outlined, color: Color(0xFF704F38)),
+      );
+    }
+  }
+
+  Future<void> _showComplaintPreviewDialog(Map<String, dynamic> complaint) async {
+    final complaintId = int.tryParse(complaint['complaint_id'].toString());
+    final brownColor = const Color(0xFF704F38);
+    final beigeColor = const Color(0xFFF7EFE6);
+
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        final status = (complaint['status'] ?? 'review').toString().toLowerCase();
+        final statusLabel = status == 'completed'
+            ? 'Completed'
+            : status == 'rejected'
+                ? 'Rejected'
+                : status == 'active'
+                    ? 'Active'
+                    : 'Review';
+
+        final decision = (complaint['admin_decision'] ?? 'pending').toString().isNotEmpty
+            ? complaint['admin_decision'].toString()
+            : 'pending';
+        final verification = (complaint['admin_verification'] ?? 'pending').toString().isNotEmpty
+            ? complaint['admin_verification'].toString()
+            : 'pending';
+
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+          child: Container(
+            width: 520,
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(24),
+              boxShadow: [
+                BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 18, offset: const Offset(0, 10)),
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 18),
+                  decoration: BoxDecoration(
+                    color: brownColor,
+                    borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.visibility_outlined, color: Colors.white, size: 20),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          'Complaint Details',
+                          style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w700),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Flexible(
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.all(22),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _buildComplaintDetailRow('Complaint #', complaint['complaint_id']?.toString() ?? 'N/A'),
+                        _buildComplaintDetailRow('Product', complaint['product_name']?.toString() ?? 'N/A'),
+                        _buildComplaintDetailRow('Customer', complaint['customer_name']?.toString() ?? 'N/A'),
+                        _buildComplaintDetailRow('Store', complaint['store_name']?.toString() ?? 'N/A'),
+                        _buildComplaintDetailRow('Type', complaint['type']?.toString() ?? 'N/A'),
+                        _buildComplaintDetailRow('Order #', complaint['order_id']?.toString() ?? 'N/A'),
+                        _buildComplaintDetailRow('Status', statusLabel),
+                        _buildComplaintDetailRow('Decision', decision.replaceAll('_', ' ').toUpperCase()),
+                        _buildComplaintDetailRow('Verification', verification.replaceAll('_', ' ').toUpperCase()),
+                        _buildComplaintDetailRow('Refund Amount', complaint['refund_amount']?.toString() ?? 'N/A'),
+                        _buildComplaintDetailRow('Filed', _formatComplaintDate(complaint['created_at'])),
+                        const SizedBox(height: 12),
+                        Text('Issue', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: brownColor)),
+                        const SizedBox(height: 4),
+                        Text(complaint['issue']?.toString() ?? 'No issue provided', style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                        const SizedBox(height: 12),
+                        Text('Description', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: brownColor)),
+                        const SizedBox(height: 4),
+                        Text(complaint['description']?.toString() ?? 'No description provided', style: TextStyle(fontSize: 13, color: Colors.grey.shade700)),
+                        const SizedBox(height: 12),
+                        Text('Admin Comment', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: brownColor)),
+                        const SizedBox(height: 4),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: beigeColor,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(
+                            (complaint['admin_comment'] ?? 'No comment yet').toString(),
+                            style: TextStyle(fontSize: 13, color: Colors.grey.shade800),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+                  decoration: const BoxDecoration(
+                    color: Color(0xFFF7EFE6),
+                    borderRadius: BorderRadius.vertical(bottom: Radius.circular(24)),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      TextButton(
+                        onPressed: () => Navigator.of(dialogContext).pop(),
+                        style: TextButton.styleFrom(foregroundColor: brownColor),
+                        child: const Text('Close'),
+                      ),
+                      const SizedBox(width: 8),
+                      ElevatedButton.icon(
+                        onPressed: complaintId == null
+                            ? null
+                            : () async {
+                                Navigator.of(dialogContext).pop();
+                                await _showComplaintReviewDialog(complaint);
+                              },
+                        icon: const Icon(Icons.edit_outlined, size: 16),
+                        label: const Text('Edit'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: brownColor,
+                          foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildComplaintDetailRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 120,
+            child: Text(label, style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w700, color: Colors.grey.shade700)),
+          ),
+          Expanded(child: Text(value, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600))),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showComplaintReviewDialog(Map<String, dynamic> complaint) async {
+    final complaintId = int.tryParse(complaint['complaint_id'].toString());
+    if (complaintId == null) return;
+
+    final draft = _complaintDrafts[complaintId] ?? {
+      'status': (complaint['status'] ?? 'review').toString(),
+      'admin_decision': (complaint['admin_decision'] ?? '').toString(),
+      'admin_verification': (complaint['admin_verification'] ?? '').toString(),
+      'admin_comment': (complaint['admin_comment'] ?? '').toString(),
+      'refund_amount': (complaint['refund_amount'] ?? '0.00').toString(),
+    };
+
+    final commentController = _complaintCommentControllers.putIfAbsent(complaintId, () => TextEditingController());
+    final refundController = _complaintRefundControllers.putIfAbsent(complaintId, () => TextEditingController());
+    commentController.text = draft['admin_comment']?.toString() ?? '';
+    refundController.text = draft['refund_amount']?.toString() ?? '0.00';
+
+    _detailsDialogAnimationController.forward();
+
+    await showDialog<void>(
+      context: context,
+      barrierColor: AdminDashboardStyles.dialogBarrierColor,
+      barrierDismissible: true,
+      builder: (dialogContext) {
+        final screenWidth = MediaQuery.of(dialogContext).size.width;
+        final isMobile = screenWidth < 768;
+
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            final complaintImages = _getComplaintImages(complaint['images']);
+            final savedComplaintStatus = (complaint['status'] ?? '').toString().toLowerCase();
+            final shouldLockFields = ['completed', 'rejected'].contains(savedComplaintStatus);
+            return AnimatedBuilder(
+              animation: _detailsDialogAnimationController,
+              builder: (context, child) {
+                return Opacity(
+                  opacity: _detailsDialogFadeAnimation.value,
+                  child: Transform.scale(
+                    scale: _detailsDialogScaleAnimation.value,
+                    child: Dialog(
+                      backgroundColor: AdminDashboardStyles.transparentColor,
+                      elevation: 0,
+                      insetPadding: AdminDashboardStyles.dialogInsetPadding(isMobile, MediaQuery.of(dialogContext).size.width),
+                      child: Container(
+                        constraints: AdminDashboardStyles.dialogConstraints(isMobile, MediaQuery.of(dialogContext).size.height),
+                        decoration: AdminDashboardStyles.detailDialogDecoration,
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.all(20),
+                              decoration: AdminDashboardStyles.detailHeaderDecoration,
+                              child: Row(
+                                children: [
+                                  Container(
+                                    width: 56,
+                                    height: 56,
+                                    decoration: AdminDashboardStyles.detailImageContainerDecoration,
+                                    child: const Icon(Icons.feedback, color: AdminDashboardStyles.surfaceColor, size: 28),
+                                  ),
+                                  AdminDashboardStyles.hSpaceLarge,
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          'Complaint Review',
+                                          style: AdminDashboardStyles.detailNameStyle,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                        const SizedBox(height: 4),
+                                        Text(
+                                          'Review #${complaint['complaint_id'] ?? 'N/A'}',
+                                          style: TextStyle(
+                                            fontSize: 14,
+                                            color: AdminDashboardStyles.surfaceColor.withOpacity(0.9),
+                                            fontWeight: FontWeight.w500,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            Flexible(
+                              child: SingleChildScrollView(
+                                padding: const EdgeInsets.all(20),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    _buildSectionTitle('Complaint Information', Icons.info_outline),
+                                    AdminDashboardStyles.vSpaceLarge,
+                                    _buildDetailRow(Icons.inventory_2_outlined, 'Product', complaint['product_name']?.toString() ?? 'N/A'),
+                                    AdminDashboardStyles.vSpaceMedium,
+                                    _buildDetailRow(Icons.person_outline, 'Customer', complaint['customer_name']?.toString() ?? 'Unknown Customer'),
+                                    AdminDashboardStyles.vSpaceMedium,
+                                    _buildDetailRow(Icons.store_outlined, 'Store', complaint['store_name']?.toString() ?? 'Unknown Store'),
+                                    AdminDashboardStyles.vSpaceMedium,
+                                    _buildDetailRow(Icons.warning_amber_rounded, 'Issue', complaint['issue']?.toString() ?? 'No issue provided'),
+                                    AdminDashboardStyles.vSpaceMedium,
+                                    _buildDetailRow(Icons.description_outlined, 'Description', complaint['description']?.toString() ?? 'No description provided', isMultiline: true),
+                                    if (complaintImages.isNotEmpty) ...[
+                                      const SizedBox(height: 24),
+                                      _buildSectionTitle('Evidence', Icons.image_outlined),
+                                      AdminDashboardStyles.vSpaceMedium,
+                                      SizedBox(
+                                        height: 100,
+                                        child: ListView.builder(
+                                          scrollDirection: Axis.horizontal,
+                                          itemCount: complaintImages.length,
+                                          itemBuilder: (context, index) {
+                                            final imageUrl = complaintImages[index];
+                                            return Container(
+                                              width: 100,
+                                              margin: const EdgeInsets.only(right: 12),
+                                              decoration: BoxDecoration(
+                                                borderRadius: BorderRadius.circular(12),
+                                                border: Border.all(color: AdminDashboardStyles.secondaryTextColor.withOpacity(0.2)),
+                                              ),
+                                              child: ClipRRect(
+                                                borderRadius: BorderRadius.circular(12),
+                                                child: _buildComplaintImage(imageUrl, width: 100, height: 100),
+                                              ),
+                                            );
+                                          },
+                                        ),
+                                      ),
+                                    ],
+                                    const SizedBox(height: 24),
+                                    _buildSectionTitle('Product Details', Icons.inventory_outlined),
+                                    AdminDashboardStyles.vSpaceLarge,
+                                    _buildDetailRow(Icons.label_outlined, 'Product Name', complaint['product_name']?.toString() ?? 'N/A'),
+                                    AdminDashboardStyles.vSpaceMedium,
+                                    _buildDetailRow(Icons.tag_outlined, 'Category', complaint['product_category']?.toString() ?? 'N/A'),
+                                    AdminDashboardStyles.vSpaceMedium,
+                                    _buildDetailRow(Icons.wc_outlined, 'Gender', complaint['product_gender']?.toString() ?? 'N/A'),
+                                    AdminDashboardStyles.vSpaceMedium,
+                                    _buildDetailRow(Icons.currency_rupee_outlined, 'Product Price', 'Rs. ${complaint['product_price']?.toString() ?? 'N/A'}'),
+                                    AdminDashboardStyles.vSpaceMedium,
+                                    _buildDetailRow(Icons.verified_outlined, 'Verified', (complaint['is_verified'] == 1 || complaint['is_verified'] == true) ? 'Yes' : 'No'),
+                                    AdminDashboardStyles.vSpaceMedium,
+                                    _buildDetailRow(Icons.description_outlined, 'Product Description', complaint['product_description']?.toString() ?? 'No description available', isMultiline: true),
+                                    const SizedBox(height: 24),
+                                    _buildSectionTitle('Order Details', Icons.local_shipping_outlined),
+                                    AdminDashboardStyles.vSpaceLarge,
+                                    _buildDetailRow(Icons.numbers_outlined, 'Order #', complaint['order_id']?.toString() ?? 'N/A'),
+                                    AdminDashboardStyles.vSpaceMedium,
+                                    _buildDetailRow(Icons.calendar_today_outlined, 'Order Date', _formatComplaintDate(complaint['order_date'] ?? complaint['created_at'])),
+                                    AdminDashboardStyles.vSpaceMedium,
+                                    _buildDetailRow(Icons.info_outlined, 'Order Status', (complaint['order_status']?.toString() ?? 'N/A').toUpperCase()),
+                                    AdminDashboardStyles.vSpaceMedium,
+                                    _buildDetailRow(Icons.currency_rupee_outlined, 'Order Total', 'Rs. ${complaint['total_price']?.toString() ?? 'N/A'}'),
+                                    AdminDashboardStyles.vSpaceMedium,
+                                    _buildDetailRow(Icons.local_shipping_outlined, 'Shipping Type', (complaint['shipping_type']?.toString() ?? 'N/A').toUpperCase()),
+                                    AdminDashboardStyles.vSpaceMedium,
+                                    _buildDetailRow(Icons.payment_outlined, 'Payment Method', complaint['payment_method']?.toString() ?? 'N/A'),
+                                    AdminDashboardStyles.vSpaceMedium,
+                                    _buildDetailRow(Icons.phone_outlined, 'Contact Number', complaint['contact_number']?.toString() ?? 'N/A'),
+                                    AdminDashboardStyles.vSpaceMedium,
+                                    _buildDetailRow(Icons.location_on_outlined, 'Shipping Address', complaint['shipping_address']?.toString() ?? 'N/A', isMultiline: true),
+                                    const SizedBox(height: 24),
+                                    _buildSectionTitle('Order Item Details', Icons.shopping_cart_outlined),
+                                    AdminDashboardStyles.vSpaceLarge,
+                                    _buildDetailRow(Icons.numbers_outlined, 'Quantity', complaint['order_quantity']?.toString() ?? 'N/A'),
+                                    AdminDashboardStyles.vSpaceMedium,
+                                    _buildDetailRow(Icons.straighten_outlined, 'Size', complaint['order_size']?.toString() ?? 'N/A'),
+                                    AdminDashboardStyles.vSpaceMedium,
+                                    _buildDetailRow(Icons.palette_outlined, 'Color', complaint['order_color']?.toString() ?? 'N/A'),
+                                    AdminDashboardStyles.vSpaceMedium,
+                                    _buildDetailRow(Icons.currency_rupee_outlined, 'Item Price', 'Rs. ${complaint['order_item_price']?.toString() ?? 'N/A'}'),
+                                    const SizedBox(height: 24),
+                                    _buildSectionTitle('Review Details', Icons.edit_outlined),
+                                    AdminDashboardStyles.vSpaceLarge,
+                                    DropdownButtonFormField<String>(
+                                      value: (draft['status'] ?? 'review').toString(),
+                                      onChanged: shouldLockFields ? null : (value) {
+                                        setDialogState(() {
+                                          draft['status'] = value ?? 'review';
+                                          _complaintDrafts[complaintId] = {
+                                            ...(_complaintDrafts[complaintId] ?? {}),
+                                            'status': value ?? 'review',
+                                          };
+                                        });
+                                      },
+                                      decoration: InputDecoration(
+                                        labelText: 'Status',
+                                        filled: true,
+                                        fillColor: AdminDashboardStyles.backgroundColor,
+                                        labelStyle: TextStyle(color: AdminDashboardStyles.primaryColor),
+                                        border: OutlineInputBorder(
+                                          borderRadius: BorderRadius.circular(12),
+                                          borderSide: BorderSide(color: AdminDashboardStyles.primaryColor.withOpacity(0.25)),
+                                        ),
+                                        enabledBorder: OutlineInputBorder(
+                                          borderRadius: BorderRadius.circular(12),
+                                          borderSide: BorderSide(color: AdminDashboardStyles.primaryColor.withOpacity(0.25)),
+                                        ),
+                                        focusedBorder: OutlineInputBorder(
+                                          borderRadius: BorderRadius.circular(12),
+                                          borderSide: BorderSide(color: AdminDashboardStyles.primaryColor, width: 2),
+                                        ),
+                                      ),
+                                      items: const [
+                                        DropdownMenuItem(value: 'review', child: Text('Review')),
+                                        DropdownMenuItem(value: 'active', child: Text('Active')),
+                                        DropdownMenuItem(value: 'completed', child: Text('Completed')),
+                                        DropdownMenuItem(value: 'rejected', child: Text('Rejected')),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 12),
+                                    DropdownButtonFormField<String>(
+                                      value: (draft['admin_decision'] ?? 'pending').toString().isNotEmpty ? (draft['admin_decision'] ?? 'pending').toString() : 'pending',
+                                      onChanged: shouldLockFields ? null : (value) {
+                                        setDialogState(() {
+                                          draft['admin_decision'] = value ?? 'pending';
+                                          _complaintDrafts[complaintId] = {
+                                            ...(_complaintDrafts[complaintId] ?? {}),
+                                            'admin_decision': value ?? 'pending',
+                                          };
+                                          _complaintValidationErrors[complaintId] = null;
+                                        });
+                                      },
+                                      decoration: InputDecoration(
+                                        labelText: 'Decision',
+                                        filled: true,
+                                        fillColor: AdminDashboardStyles.backgroundColor,
+                                        labelStyle: TextStyle(color: AdminDashboardStyles.primaryColor),
+                                        border: OutlineInputBorder(
+                                          borderRadius: BorderRadius.circular(12),
+                                          borderSide: BorderSide(color: AdminDashboardStyles.primaryColor.withOpacity(0.25)),
+                                        ),
+                                        enabledBorder: OutlineInputBorder(
+                                          borderRadius: BorderRadius.circular(12),
+                                          borderSide: BorderSide(color: AdminDashboardStyles.primaryColor.withOpacity(0.25)),
+                                        ),
+                                        focusedBorder: OutlineInputBorder(
+                                          borderRadius: BorderRadius.circular(12),
+                                          borderSide: BorderSide(color: AdminDashboardStyles.primaryColor, width: 2),
+                                        ),
+                                      ),
+                                      items: const [
+                                        DropdownMenuItem(value: 'pending', child: Text('Pending')),
+                                        DropdownMenuItem(value: 'full_refund', child: Text('Full Refund')),
+                                        DropdownMenuItem(value: 'half_refund', child: Text('Half Refund')),
+                                        DropdownMenuItem(value: 'no_refund', child: Text('No Refund')),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 12),
+                                    DropdownButtonFormField<String>(
+                                      value: (draft['admin_verification'] ?? 'pending').toString().isNotEmpty ? (draft['admin_verification'] ?? 'pending').toString() : 'pending',
+                                      onChanged: shouldLockFields ? null : (value) {
+                                        setDialogState(() {
+                                          draft['admin_verification'] = value ?? 'pending';
+                                          _complaintDrafts[complaintId] = {
+                                            ...(_complaintDrafts[complaintId] ?? {}),
+                                            'admin_verification': value ?? 'pending',
+                                          };
+                                        });
+                                      },
+                                      decoration: InputDecoration(
+                                        labelText: 'Verification',
+                                        filled: true,
+                                        fillColor: AdminDashboardStyles.backgroundColor,
+                                        labelStyle: TextStyle(color: AdminDashboardStyles.primaryColor),
+                                        border: OutlineInputBorder(
+                                          borderRadius: BorderRadius.circular(12),
+                                          borderSide: BorderSide(color: AdminDashboardStyles.primaryColor.withOpacity(0.25)),
+                                        ),
+                                        enabledBorder: OutlineInputBorder(
+                                          borderRadius: BorderRadius.circular(12),
+                                          borderSide: BorderSide(color: AdminDashboardStyles.primaryColor.withOpacity(0.25)),
+                                        ),
+                                        focusedBorder: OutlineInputBorder(
+                                          borderRadius: BorderRadius.circular(12),
+                                          borderSide: BorderSide(color: AdminDashboardStyles.primaryColor, width: 2),
+                                        ),
+                                      ),
+                                      items: const [
+                                        DropdownMenuItem(value: 'pending', child: Text('Pending')),
+                                        DropdownMenuItem(value: 'verified_by_seller', child: Text('Verified by Seller')),
+                                        DropdownMenuItem(value: 'verified_by_images', child: Text('Verified by Images')),
+                                        DropdownMenuItem(value: 'not_verified', child: Text('Not Verified')),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 12),
+                                    TextField(
+                                      controller: commentController,
+                                      maxLines: 4,
+                                      enabled: !shouldLockFields,
+                                      readOnly: shouldLockFields,
+                                      inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9A-Za-z\s.,]'))],
+                                      decoration: InputDecoration(
+                                        labelText: 'Admin Comment',
+                                        filled: true,
+                                        fillColor: AdminDashboardStyles.backgroundColor,
+                                        labelStyle: TextStyle(color: AdminDashboardStyles.primaryColor),
+                                        border: OutlineInputBorder(
+                                          borderRadius: BorderRadius.circular(12),
+                                          borderSide: BorderSide(color: AdminDashboardStyles.primaryColor.withOpacity(0.25)),
+                                        ),
+                                        enabledBorder: OutlineInputBorder(
+                                          borderRadius: BorderRadius.circular(12),
+                                          borderSide: BorderSide(color: AdminDashboardStyles.primaryColor.withOpacity(0.25)),
+                                        ),
+                                        focusedBorder: OutlineInputBorder(
+                                          borderRadius: BorderRadius.circular(12),
+                                          borderSide: BorderSide(color: AdminDashboardStyles.primaryColor, width: 2),
+                                        ),
+                                      ),
+                                      onChanged: (value) {
+                                        setDialogState(() {
+                                          draft['admin_comment'] = value;
+                                          _complaintDrafts[complaintId] = {
+                                            ...(_complaintDrafts[complaintId] ?? {}),
+                                            'admin_comment': value,
+                                          };
+                                          _complaintValidationErrors[complaintId] = null;
+                                        });
+                                      },
+                                    ),
+                                    const SizedBox(height: 12),
+                                    TextField(
+                                      controller: refundController,
+                                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                                      enabled: !shouldLockFields,
+                                      readOnly: shouldLockFields,
+                                      inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.]'))],
+                                      decoration: InputDecoration(
+                                        labelText: 'Refund Amount',
+                                        filled: true,
+                                        fillColor: AdminDashboardStyles.backgroundColor,
+                                        labelStyle: TextStyle(color: AdminDashboardStyles.primaryColor),
+                                        border: OutlineInputBorder(
+                                          borderRadius: BorderRadius.circular(12),
+                                          borderSide: BorderSide(color: AdminDashboardStyles.primaryColor.withOpacity(0.25)),
+                                        ),
+                                        enabledBorder: OutlineInputBorder(
+                                          borderRadius: BorderRadius.circular(12),
+                                          borderSide: BorderSide(color: AdminDashboardStyles.primaryColor.withOpacity(0.25)),
+                                        ),
+                                        focusedBorder: OutlineInputBorder(
+                                          borderRadius: BorderRadius.circular(12),
+                                          borderSide: BorderSide(color: AdminDashboardStyles.primaryColor, width: 2),
+                                        ),
+                                      ),
+                                      onChanged: (value) {
+                                        setDialogState(() {
+                                          draft['refund_amount'] = value;
+                                          _complaintDrafts[complaintId] = {
+                                            ...(_complaintDrafts[complaintId] ?? {}),
+                                            'refund_amount': value,
+                                          };
+                                          _complaintValidationErrors[complaintId] = null;
+                                        });
+                                      },
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                            Padding(
+                              padding: const EdgeInsets.all(20),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  if (_complaintValidationErrors[complaintId] != null)
+                                    Container(
+                                      margin: const EdgeInsets.only(bottom: 12),
+                                      padding: const EdgeInsets.all(12),
+                                      decoration: BoxDecoration(
+                                        color: Colors.red.shade50,
+                                        borderRadius: BorderRadius.circular(10),
+                                        border: Border.all(color: Colors.red.shade200),
+                                      ),
+                                      child: Row(
+                                        children: [
+                                          Icon(Icons.error_outline, color: Colors.red.shade700, size: 18),
+                                          const SizedBox(width: 8),
+                                          Expanded(
+                                            child: Text(
+                                              _complaintValidationErrors[complaintId]!,
+                                              style: TextStyle(color: Colors.red.shade700, fontSize: 12.5, fontWeight: FontWeight.w600),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  if (shouldLockFields)
+                                    Container(
+                                      margin: const EdgeInsets.only(bottom: 12),
+                                      padding: const EdgeInsets.all(12),
+                                      decoration: BoxDecoration(
+                                        color: Colors.amber.shade50,
+                                        borderRadius: BorderRadius.circular(10),
+                                        border: Border.all(color: Colors.amber.shade200),
+                                      ),
+                                      child: Row(
+                                        children: [
+                                          Icon(Icons.lock_outline, color: Colors.amber.shade800, size: 18),
+                                          const SizedBox(width: 8),
+                                          Expanded(
+                                            child: Text(
+                                              'This complaint has been finalized and the review fields are locked.',
+                                              style: TextStyle(color: Colors.amber.shade800, fontSize: 12.5, fontWeight: FontWeight.w600),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  Row(
+                                    mainAxisAlignment: MainAxisAlignment.end,
+                                    children: [
+                                      OutlinedButton(
+                                        onPressed: () => Navigator.of(dialogContext).pop(),
+                                        style: OutlinedButton.styleFrom(
+                                          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                                          side: BorderSide(color: AdminDashboardStyles.primaryColor, width: 1.2),
+                                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                        ),
+                                        child: Text(
+                                          'Cancel',
+                                          style: TextStyle(color: AdminDashboardStyles.primaryColor, fontWeight: FontWeight.w600),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 12),
+                                      ElevatedButton(
+                                        onPressed: shouldLockFields
+                                            ? null
+                                            : () async {
+                                                final validationError = _validateComplaintDraft(complaintId, draft);
+                                                if (validationError != null) {
+                                                  setDialogState(() {
+                                                    _complaintValidationErrors[complaintId] = validationError;
+                                                  });
+                                                  return;
+                                                }
+
+                                                final success = await _saveComplaint(complaintId);
+                                                if (success && mounted) {
+                                                  Navigator.of(dialogContext).pop();
+                                                }
+                                              },
+                                        style: ElevatedButton.styleFrom(
+                                          backgroundColor: AdminDashboardStyles.primaryColor,
+                                          foregroundColor: AdminDashboardStyles.surfaceColor,
+                                          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                                        ),
+                                        child: Text(shouldLockFields ? 'Locked' : 'Save'),
+                                      ),
+                                    ],
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              },
+            );
+          },
+        );
+      },
+    ).then((_) {
+      _detailsDialogAnimationController.reset();
+    });
+  }
+
+  String? _validateComplaintDraft(int complaintId, Map<String, dynamic> draft) {
+    final refundText = (draft['refund_amount'] ?? '').toString().trim();
+    if (refundText.isNotEmpty) {
+      final refundValue = double.tryParse(refundText);
+      if (refundValue == null || refundValue < 0) {
+        return 'Refund amount must be a valid non-negative number.';
+      }
+    }
+
+    final comment = (draft['admin_comment'] ?? '').toString().trim();
+    if (comment.isNotEmpty) {
+      if (!RegExp(r'^[A-Za-z0-9\s.,]+$').hasMatch(comment)) {
+        return 'Admin comment can only contain letters, numbers, spaces, commas, and dots.';
+      }
+
+      final wordCount = comment.split(RegExp(r'\s+')).where((part) => part.isNotEmpty).length;
+      if (wordCount >= 50) {
+        return 'Admin comment must be less than 50 words.';
+      }
+    }
+
+    _complaintValidationErrors[complaintId] = null;
+    return null;
+  }
+
+  Future<bool> _saveComplaint(int complaintId) async {
+    final draft = _complaintDrafts[complaintId];
+    if (draft == null) return false;
+
+    if (mounted) {
+      setState(() {
+        _savingComplaintIds[complaintId] = true;
+      });
+    }
+
+    final refundText = (draft['refund_amount'] ?? '').toString().trim();
+    final normalizedRefundText = refundText.isEmpty ? '0.00' : refundText;
+
+    final result = await ApiService.updateComplaintStatus(
+      complaintId: complaintId,
+      status: draft['status']?.toString() ?? 'review',
+      adminDecision: draft['admin_decision']?.toString(),
+      adminVerification: draft['admin_verification']?.toString(),
+      adminComment: draft['admin_comment']?.toString(),
+      refundAmount: double.tryParse(normalizedRefundText),
+    );
+
+    bool success = false;
+    if (mounted) {
+      if (result['success']) {
+        setState(() {
+          final index = _complaints.indexWhere((complaint) => int.tryParse(complaint['complaint_id'].toString()) == complaintId);
+          if (index != -1) {
+            _complaints[index]['status'] = draft['status']?.toString() ?? 'review';
+            _complaints[index]['admin_decision'] = draft['admin_decision']?.toString() ?? '';
+            _complaints[index]['admin_verification'] = draft['admin_verification']?.toString() ?? '';
+            _complaints[index]['admin_comment'] = draft['admin_comment']?.toString() ?? '';
+            _complaints[index]['refund_amount'] = draft['refund_amount']?.toString() ?? '0.00';
+          }
+
+          if (['completed', 'rejected'].contains((draft['status'] ?? '').toString().toLowerCase())) {
+            _complaintDrafts[complaintId] = {
+              ...draft,
+              'status': draft['status']?.toString() ?? 'review',
+            };
+          }
+        });
+        _showSnackBar('Complaint updated', Colors.green);
+        success = true;
+      } else {
+        _showSnackBar(result['message'] ?? 'Failed to update complaint', AdminDashboardStyles.errorColor);
+      }
+    }
+
+    if (mounted) {
+      setState(() {
+        _savingComplaintIds[complaintId] = false;
+      });
+    }
+
+    return success;
+  }
+
+  String _formatComplaintDate(dynamic date) {
+    if (date == null) return 'N/A';
+    try {
+      final dt = DateTime.parse(date.toString());
+      final months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      return '${dt.day} ${months[dt.month - 1]} ${dt.year}';
+    } catch (_) {
+      return date.toString();
+    }
   }
 
   Widget _buildNotificationsView() {

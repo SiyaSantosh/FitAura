@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'dart:convert';
+import 'dart:io';
+import 'package:image_picker/image_picker.dart';
 import '../services/api_service.dart';
 import '../styles/help_center_styles.dart';
 import 'package:intl/intl.dart';
@@ -114,7 +116,7 @@ class _MyOrdersScreenState extends State<MyOrdersScreen> with SingleTickerProvid
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Icon(Icons.shopping_bag_outlined, size: 64, color: HelpCenterStyles.lightGrayColor.withOpacity(0.5)),
-            const SizedBox(height: 16),
+SizedBox(height: 16),
             Text(
               'No orders found',
               style: TextStyle(color: HelpCenterStyles.lightGrayColor, fontSize: 16),
@@ -234,6 +236,9 @@ class _MyOrdersScreenState extends State<MyOrdersScreen> with SingleTickerProvid
 
               final data = snapshot.data!['data'];
               final items = List<Map<String, dynamic>>.from(data['items'] ?? []);
+              final double walletUsed = double.tryParse(data['wallet_amount']?.toString() ?? '0') ?? 0.0;
+              final double cashPaid = double.tryParse(data['cash_amount']?.toString() ?? '0') ?? 0.0;
+              final double totalPrice = double.tryParse(data['total_price']?.toString() ?? '0') ?? 0.0;
 
               return ListView(
                 controller: scrollController,
@@ -280,7 +285,13 @@ class _MyOrdersScreenState extends State<MyOrdersScreen> with SingleTickerProvid
                   const SizedBox(height: 24),
                   _buildDetailSection('Payment Information', [
                     _buildDetailRow('Method', data['payment_method'] ?? 'N/A'),
-                    _buildDetailRow('Total Price', 'Rs. ${data['total_price']}', isBold: true),
+                    if (walletUsed != 0) ...[
+                      _buildDetailRow('Wallet Used', 'Rs. ${walletUsed.toStringAsFixed(2)}'),
+                      if (cashPaid != 0) const SizedBox(height: 8),
+                    ],
+                    if (cashPaid != 0)
+                      _buildDetailRow('Cash Paid', 'Rs. ${cashPaid.toStringAsFixed(2)}'),
+                    _buildDetailRow('Total Price', 'Rs. ${totalPrice.toStringAsFixed(2)}', isBold: true),
                   ]),
                   const SizedBox(height: 40),
                 ],
@@ -342,23 +353,400 @@ class _MyOrdersScreenState extends State<MyOrdersScreen> with SingleTickerProvid
           ),
           if (isCompleted) ...[
             const SizedBox(height: 8),
-            Align(
-              alignment: Alignment.centerRight,
-              child: TextButton.icon(
-                onPressed: () => _showReviewDialog(orderId, item['product_id'], item['product_name'] ?? 'Product'),
-                icon: const Icon(Icons.star_outline, size: 16, color: HelpCenterStyles.primaryColor),
-                label: const Text('Rate & Review', style: TextStyle(color: HelpCenterStyles.primaryColor, fontSize: 12, fontWeight: FontWeight.bold)),
-                style: TextButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    side: const BorderSide(color: HelpCenterStyles.primaryColor, width: 0.5),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                TextButton.icon(
+                  onPressed: () => _showReviewDialog(orderId, item['product_id'], item['product_name'] ?? 'Product'),
+                  icon: const Icon(Icons.star_outline, size: 16, color: HelpCenterStyles.primaryColor),
+                  label: const Text('Rate & Review', style: TextStyle(color: HelpCenterStyles.primaryColor, fontSize: 12, fontWeight: FontWeight.bold)),
+                  style: TextButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      side: const BorderSide(color: HelpCenterStyles.primaryColor, width: 0.5),
+                    ),
                   ),
                 ),
-              ),
+                const SizedBox(width: 8),
+                TextButton.icon(
+                  onPressed: () => _showComplaintDialog(
+                    orderId: orderId,
+                    productId: item['product_id'],
+                    storeId: item['store_id'] ?? 0,
+                    productName: item['product_name'] ?? 'Product',
+                  ),
+                  icon: const Icon(Icons.report_problem_outlined, size: 16, color: Colors.red),
+                  label: const Text('Complaint', style: TextStyle(color: Colors.red, fontSize: 12, fontWeight: FontWeight.bold)),
+                  style: TextButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      side: const BorderSide(color: Colors.red, width: 0.5),
+                    ),
+                  ),
+                ),
+              ],
             ),
           ],
         ],
+      ),
+    );
+  }
+
+  void _showComplaintDialog({
+    required int orderId,
+    required int productId,
+    required int storeId,
+    required String productName,
+  }) {
+    String selectedType = 'return';
+    String selectedIssue = 'Torn';
+    final descController = TextEditingController();
+    final List<File> pickedImages = [];
+    String? descError;
+    String? imageError;
+    bool isSubmitting = false;
+
+    const List<String> issueOptions = [
+      'Torn',
+      'Not same as image',
+      'Color defect',
+      'Size mismatch',
+      'Damaged packaging',
+      'Missing item',
+      'Wrong item',
+      'Other',
+    ];
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) => DraggableScrollableSheet(
+          initialChildSize: 0.7,
+          maxChildSize: 0.9,
+          minChildSize: 0.5,
+          expand: false,
+          builder: (ctx, scrollController) => Container(
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+            ),
+            child: ListView(
+              controller: scrollController,
+              padding: const EdgeInsets.all(24),
+              children: [
+                Center(
+                  child: Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.grey[300],
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 24),
+                Row(
+                  children: [
+                    const Icon(Icons.report_problem_outlined, color: HelpCenterStyles.primaryColor),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        'File Complaint — $productName',
+                        style: HelpCenterStyles.appBarTitleStyle.copyWith(fontSize: 18),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close, color: HelpCenterStyles.lightGrayColor),
+                      onPressed: () => Navigator.pop(ctx),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 24),
+                const Divider(height: 1),
+                const SizedBox(height: 24),
+                const Text(
+                  'Request Type',
+                  style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16, color: HelpCenterStyles.darkTextColor),
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    Expanded(
+                      child: GestureDetector(
+                        onTap: () => setSheetState(() => selectedType = 'return'),
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 200),
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          decoration: BoxDecoration(
+                            color: selectedType == 'return' ? HelpCenterStyles.primaryColor : Colors.transparent,
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(
+                              color: selectedType == 'return' ? HelpCenterStyles.primaryColor : Colors.grey.shade300,
+                            ),
+                          ),
+                          child: Center(
+                            child: Text(
+                              'Return',
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                color: selectedType == 'return' ? Colors.white : Colors.grey.shade600,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: GestureDetector(
+                        onTap: () => setSheetState(() => selectedType = 'exchange'),
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 200),
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          decoration: BoxDecoration(
+                            color: selectedType == 'exchange' ? HelpCenterStyles.primaryColor : Colors.transparent,
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(
+                              color: selectedType == 'exchange' ? HelpCenterStyles.primaryColor : Colors.grey.shade300,
+                            ),
+                          ),
+                          child: Center(
+                            child: Text(
+                              'Exchange',
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                color: selectedType == 'exchange' ? Colors.white : Colors.grey.shade600,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 24),
+                const Text(
+                  'Issue Type',
+                  style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16, color: HelpCenterStyles.darkTextColor),
+                ),
+                const SizedBox(height: 10),
+                DropdownButtonFormField<String>(
+                  value: selectedIssue,
+                  isExpanded: true,
+                  icon: const Icon(Icons.keyboard_arrow_down_rounded, color: HelpCenterStyles.primaryColor, size: 20),
+                  dropdownColor: Colors.white,
+                  style: const TextStyle(fontSize: 14, color: HelpCenterStyles.darkTextColor),
+                  decoration: InputDecoration(
+                    filled: true,
+                    fillColor: HelpCenterStyles.beigeBackgroundColor,
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none,
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none,
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: const BorderSide(color: HelpCenterStyles.primaryColor, width: 1.5),
+                    ),
+                  ),
+                  items: issueOptions.map((issue) => DropdownMenuItem(
+                    value: issue,
+                    child: Text(issue, style: const TextStyle(fontSize: 14, color: HelpCenterStyles.darkTextColor)),
+                  )).toList(),
+                  onChanged: (v) => setSheetState(() => selectedIssue = v!),
+                ),
+                const SizedBox(height: 24),
+                const Text(
+                  'Description',
+                  style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16, color: HelpCenterStyles.darkTextColor),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: descController,
+                  maxLines: 4,
+                  style: const TextStyle(fontSize: 14, color: HelpCenterStyles.darkTextColor),
+                  decoration: InputDecoration(
+                    hintText: 'Describe the issue in detail...',
+                    hintStyle: const TextStyle(color: Colors.grey, fontSize: 14),
+                    filled: true,
+                    fillColor: HelpCenterStyles.beigeBackgroundColor,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none,
+                    ),
+                    contentPadding: const EdgeInsets.all(16),
+                  ),
+                ),
+                if (descError != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(descError!, style: const TextStyle(color: Colors.red, fontSize: 12)),
+                  ),
+                const SizedBox(height: 24),
+                const Text(
+                  'Upload Photos (Optional, max 3)',
+                  style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 16, color: HelpCenterStyles.darkTextColor),
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    ...pickedImages.map((f) => Stack(
+                      children: [
+                        Container(
+                          width: 72,
+                          height: 72,
+                          margin: const EdgeInsets.only(right: 8),
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: Colors.grey.shade300),
+                            image: DecorationImage(
+                              image: FileImage(f),
+                              fit: BoxFit.cover,
+                            ),
+                          ),
+                        ),
+                        Positioned(
+                          top: 2,
+                          right: 10,
+                          child: GestureDetector(
+                            onTap: () => setSheetState(() => pickedImages.remove(f)),
+                            child: Container(
+                              padding: const EdgeInsets.all(2),
+                              decoration: const BoxDecoration(
+                                color: Colors.red,
+                                shape: BoxShape.circle,
+                              ),
+                              child: const Icon(Icons.close, size: 12, color: Colors.white),
+                            ),
+                          ),
+                        ),
+                      ],
+                    )),
+                    if (pickedImages.length < 3)
+                      GestureDetector(
+                        onTap: () async {
+                          final picked = await ImagePicker().pickImage(
+                            source: ImageSource.gallery,
+                            imageQuality: 60,
+                          );
+                          if (picked != null) {
+                            setSheetState(() => pickedImages.add(File(picked.path)));
+                          }
+                        },
+                        child: Container(
+                          width: 72,
+                          height: 72,
+                          decoration: BoxDecoration(
+                            color: HelpCenterStyles.beigeBackgroundColor,
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: Colors.grey.shade300, style: BorderStyle.solid),
+                          ),
+                          child: const Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(Icons.add_photo_alternate_outlined, color: HelpCenterStyles.primaryColor, size: 28),
+                              SizedBox(height: 4),
+                              Text('Add', style: const TextStyle(fontSize: 11, color: HelpCenterStyles.primaryColor)),
+                            ],
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+                if (imageError != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(imageError!, style: const TextStyle(color: Colors.red, fontSize: 12)),
+                  ),
+                const SizedBox(height: 32),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    onPressed: isSubmitting ? null : () async {
+                      final desc = descController.text.trim();
+                      setSheetState(() {
+                        descError = null;
+                        imageError = null;
+                      });
+                      final int wordCount = desc.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).length;
+                      final bool descValid = wordCount <= 50 && RegExp(r'^[a-zA-Z0-9\s,\.]+$').hasMatch(desc);
+                      if (!descValid) {
+                        setSheetState(() => descError = 'Description must be up to 50 words and may contain letters, numbers, spaces, commas, and periods');
+                        return;
+                      }
+                      if (pickedImages.isEmpty) {
+                        setSheetState(() => imageError = 'Please attach at least one image');
+                        return;
+                      }
+                      setSheetState(() => isSubmitting = true);
+
+                      final List<String> b64Images = [];
+                      for (final f in pickedImages) {
+                        final bytes = await f.readAsBytes();
+                        b64Images.add(base64Encode(bytes));
+                      }
+
+                      final res = await ApiService.submitComplaint(
+                        orderId: orderId,
+                        productId: productId,
+                        storeId: storeId,
+                        userId: widget.userId,
+                        type: selectedType,
+                        issue: selectedIssue,
+                        description: desc,
+                        images: b64Images,
+                      );
+
+                      setSheetState(() => isSubmitting = false);
+
+                      if (res['success'] == true) {
+                          // Notify customer and seller via backend
+                          final int? complaintId = res['complaint_id'];
+                          if (complaintId != null) {
+                            await ApiService.notifyComplaintEmails(
+                              complaintId: complaintId,
+                              orderId: orderId,
+                              productId: productId,
+                              storeId: storeId,
+                              userId: widget.userId,
+                            );
+                          }
+                          Navigator.pop(ctx);
+                        } else {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(res['message'] ?? 'Failed to file complaint'),
+                            backgroundColor: Colors.red,
+                          ),
+                        );
+                      }
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: HelpCenterStyles.primaryColor,
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                      elevation: 0,
+                    ),
+                    child: isSubmitting
+                        ? const SizedBox(height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                        : const Text('Submit Complaint', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16)),
+                  ),
+                ),
+                const SizedBox(height: 24),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
