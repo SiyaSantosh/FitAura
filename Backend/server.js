@@ -1527,6 +1527,80 @@ app.get('/api/wallets/user/:userId', (req, res) => {
   });
 });
 
+app.get('/api/wallets/store/:userId', (req, res) => {
+  const { userId } = req.params;
+  db.query('SELECT store_id FROM store WHERE owner_id = ?', [userId], (storeErr, storeRows) => {
+    if (storeErr) {
+      console.error('Store query error for user', userId, ':', storeErr);
+      return res.status(500).json({ success: false, message: 'Database error fetching store', error: storeErr.message });
+    }
+    if (!storeRows || storeRows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Store not found for user' });
+    }
+
+    const storeId = storeRows[0].store_id;
+    const walletSummarySql = `
+      SELECT
+        COALESCE(SUM(balance), 0) AS total_balance,
+        COUNT(*) AS customer_count
+      FROM wallet_store_credit
+      WHERE store_id = ? AND balance > 0
+    `;
+
+    db.query(walletSummarySql, [storeId], (summaryErr, summaryRows) => {
+      if (summaryErr) {
+        console.error('Store wallet summary query error for store', storeId, ':', summaryErr);
+        return res.status(500).json({ success: false, message: 'Database error fetching store wallet summary', error: summaryErr.message });
+      }
+
+      const walletTransactionsSql = `
+        SELECT
+          'credit' AS type,
+          SUM(oi.price * oi.quantity) AS amount,
+          CONCAT('Order #', o.order_id) AS description,
+          o.created_at AS timestamp,
+          CASE
+            WHEN o.wallet_amount > 0 AND o.cash_amount > 0 THEN CONCAT('Wallet Rs. ', o.wallet_amount, ' + Cash Rs. ', o.cash_amount)
+            WHEN o.wallet_amount > 0 THEN CONCAT('Wallet Rs. ', o.wallet_amount)
+            WHEN LOWER(o.payment_method) LIKE '%cash%' THEN CONCAT('Cash on Delivery: Rs. ', o.cash_amount)
+            ELSE CONCAT('Cash: Rs. ', o.cash_amount)
+          END AS method
+        FROM orders o
+        JOIN order_items oi ON oi.order_id = o.order_id
+        JOIN products p ON p.product_id = oi.product_id
+        WHERE p.store_id = ? AND o.order_status = 'completed'
+        GROUP BY o.order_id, o.created_at, o.wallet_amount, o.cash_amount, o.payment_method
+        UNION ALL
+        SELECT
+          'debit' AS type,
+          c.refund_amount AS amount,
+          CONCAT('Complaint refund #', c.complaint_id) AS description,
+          c.created_at AS timestamp,
+          'Refund' AS method
+        FROM complaints c
+        WHERE c.store_id = ? AND c.status = 'completed' AND c.refund_amount > 0
+        ORDER BY timestamp DESC
+      `;
+
+      db.query(walletTransactionsSql, [storeId, storeId], (txErr, txRows) => {
+        if (txErr) {
+          console.error('Store wallet transaction query error for store', storeId, ':', txErr);
+          return res.status(500).json({ success: false, message: 'Database error fetching store wallet transactions', error: txErr.message });
+        }
+
+        res.json({
+          success: true,
+          data: {
+            total_balance: Number(summaryRows[0]?.total_balance || 0),
+            customer_count: Number(summaryRows[0]?.customer_count || 0),
+            transactions: txRows,
+          },
+        });
+      });
+    });
+  });
+});
+
 
 // --- Submit Review ---
 app.post('/api/reviews', (req, res) => {
@@ -1760,16 +1834,16 @@ app.delete('/api/promotions/:promotionId/products/:productId', (req, res) => {
 
 // File a complaint
 app.post('/api/complaints', (req, res) => {
-  const { order_id, product_id, store_id, user_id, type, issue, description, images } = req.body;
-  if (!order_id || !product_id || !store_id || !user_id || !type || !issue || !description) {
+  const { order_id, product_id, store_id, user_id, issue, description, images } = req.body;
+  if (!order_id || !product_id || !store_id || !user_id || !issue || !description) {
     return res.status(400).json({ success: false, message: 'Missing required complaint fields' });
   }
 
   // Convert array of base64 images into a JSON string to store in LONGTEXT images column
   const imagesStr = Array.isArray(images) ? JSON.stringify(images) : null;
 
-  const sql = `INSERT INTO complaints (order_id, product_id, store_id, user_id, type, issue, description, images) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`;
-  db.query(sql, [order_id, product_id, store_id, user_id, type, issue, description, imagesStr], (err, results) => {
+  const sql = `INSERT INTO complaints (order_id, product_id, store_id, user_id, issue, description, images) VALUES (?, ?, ?, ?, ?, ?, ?)`;
+  db.query(sql, [order_id, product_id, store_id, user_id, issue, description, imagesStr], (err, results) => {
     if (err) return res.status(500).json({ success: false, message: 'Database error filing complaint', error: err.message });
     res.status(201).json({ success: true, complaint_id: results.insertId });
   });

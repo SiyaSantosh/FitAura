@@ -4712,12 +4712,10 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Ticker
       final productName = (complaint['product_name'] ?? '').toString().toLowerCase();
       final issue = (complaint['issue'] ?? '').toString().toLowerCase();
       final description = (complaint['description'] ?? '').toString().toLowerCase();
-      final type = (complaint['type'] ?? '').toString().toLowerCase();
       return customerName.contains(query) ||
           productName.contains(query) ||
           issue.contains(query) ||
-          description.contains(query) ||
-          type.contains(query);
+          description.contains(query);
     }).toList();
 
     final filteredComplaints = List<Map<String, dynamic>>.from(normalizedComplaints)
@@ -5066,7 +5064,6 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Ticker
                         _buildComplaintDetailRow('Product', complaint['product_name']?.toString() ?? 'N/A'),
                         _buildComplaintDetailRow('Customer', complaint['customer_name']?.toString() ?? 'N/A'),
                         _buildComplaintDetailRow('Store', complaint['store_name']?.toString() ?? 'N/A'),
-                        _buildComplaintDetailRow('Type', complaint['type']?.toString() ?? 'N/A'),
                         _buildComplaintDetailRow('Order #', complaint['order_id']?.toString() ?? 'N/A'),
                         _buildComplaintDetailRow('Status', statusLabel),
                         _buildComplaintDetailRow('Decision', decision.replaceAll('_', ' ').toUpperCase()),
@@ -5296,7 +5293,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Ticker
                                     AdminDashboardStyles.vSpaceMedium,
                                     _buildDetailRow(Icons.wc_outlined, 'Gender', complaint['product_gender']?.toString() ?? 'N/A'),
                                     AdminDashboardStyles.vSpaceMedium,
-                                    _buildDetailRow(Icons.currency_rupee_outlined, 'Product Price', 'Rs. ${complaint['product_price']?.toString() ?? 'N/A'}'),
+                                    _buildDetailRow(Icons.attach_money_outlined, 'Product Price', 'Rs. ${complaint['product_price']?.toString() ?? 'N/A'}'),
                                     AdminDashboardStyles.vSpaceMedium,
                                     _buildDetailRow(Icons.verified_outlined, 'Verified', (complaint['is_verified'] == 1 || complaint['is_verified'] == true) ? 'Yes' : 'No'),
                                     AdminDashboardStyles.vSpaceMedium,
@@ -5310,7 +5307,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Ticker
                                     AdminDashboardStyles.vSpaceMedium,
                                     _buildDetailRow(Icons.info_outlined, 'Order Status', (complaint['order_status']?.toString() ?? 'N/A').toUpperCase()),
                                     AdminDashboardStyles.vSpaceMedium,
-                                    _buildDetailRow(Icons.currency_rupee_outlined, 'Order Total', 'Rs. ${complaint['total_price']?.toString() ?? 'N/A'}'),
+                                    _buildDetailRow(Icons.attach_money_outlined, 'Order Total', 'Rs. ${complaint['total_price']?.toString() ?? 'N/A'}'),
                                     AdminDashboardStyles.vSpaceMedium,
                                     _buildDetailRow(Icons.local_shipping_outlined, 'Shipping Type', (complaint['shipping_type']?.toString() ?? 'N/A').toUpperCase()),
                                     AdminDashboardStyles.vSpaceMedium,
@@ -5328,7 +5325,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Ticker
                                     AdminDashboardStyles.vSpaceMedium,
                                     _buildDetailRow(Icons.palette_outlined, 'Color', complaint['order_color']?.toString() ?? 'N/A'),
                                     AdminDashboardStyles.vSpaceMedium,
-                                    _buildDetailRow(Icons.currency_rupee_outlined, 'Item Price', 'Rs. ${complaint['order_item_price']?.toString() ?? 'N/A'}'),
+                                    _buildDetailRow(Icons.attach_money_outlined, 'Item Price', 'Rs. ${complaint['order_item_price']?.toString() ?? 'N/A'}'),
                                     const SizedBox(height: 24),
                                     _buildSectionTitle('Review Details', Icons.edit_outlined),
                                     AdminDashboardStyles.vSpaceLarge,
@@ -5402,7 +5399,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> with Ticker
                                       items: const [
                                         DropdownMenuItem(value: 'pending', child: Text('Pending')),
                                         DropdownMenuItem(value: 'full_refund', child: Text('Full Refund')),
-                                        DropdownMenuItem(value: 'half_refund', child: Text('Half Refund')),
+                                        DropdownMenuItem(value: 'partial_refund', child: Text('Partial Refund')),
                                         DropdownMenuItem(value: 'no_refund', child: Text('No Refund')),
                                       ],
                                     ),

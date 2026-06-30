@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as path;
 import 'package:image_picker/image_picker.dart';
+import 'package:intl/intl.dart';
 import '../services/api_service.dart';
 import 'sign_in_screen.dart';
 import '../widgets/custom_snackbar.dart';
@@ -88,6 +89,10 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
   List<dynamic> _chats = [];
   String _complaintFilter = 'all';
 
+  double _storeWalletTotalBalance = 0.0;
+  int _storeWalletCustomerCount = 0;
+  List<Map<String, dynamic>> _storeWalletTransactions = [];
+
   int get _unreadNotificationCount {
     return _notifications.where((notification) {
       final status = notification['is_read'];
@@ -121,6 +126,7 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
   static const int _messagesTabIndex = 3;
   static const int _settingsTabIndex = 6;
   static const int _complaintsTabIndex = 8;
+  static const int _transactionsTabIndex = 9;
 
   String _language = 'English';
   String _themeMode = 'Light';
@@ -211,6 +217,12 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
       'activeIcon': Icons.shopping_bag,
       'label': 'Orders',
       'index': 2,
+    },
+    {
+      'icon': Icons.receipt_long_outlined,
+      'activeIcon': Icons.receipt_long,
+      'label': 'Transactions',
+      'index': _transactionsTabIndex,
     },
     {
       'icon': Icons.chat_outlined,
@@ -560,6 +572,8 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
       await Future.wait([_loadStoreInfo(), _loadUserData()]);
     } else if (_selectedTab == 7) {
       await Future.wait([_loadStoreInfo(), _loadProducts(), _loadPromotions()]);
+    } else if (_selectedTab == _transactionsTabIndex) {
+      await Future.wait([_loadStoreInfo(), _loadStoreWalletData()]);
     }
 
     setState(() => _isLoading = false);
@@ -634,6 +648,72 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
     }
   }
 
+  Future<void> _loadStoreWalletData() async {
+    if (widget.userId == null) return;
+
+    try {
+      final result = await ApiService.getStoreWalletData(widget.userId!);
+      if (result['success'] && result['data'] != null) {
+        final data = result['data'] as Map<String, dynamic>;
+        setState(() {
+          _storeWalletTotalBalance =
+              double.tryParse(data['total_balance']?.toString() ?? '0') ?? 0.0;
+          _storeWalletCustomerCount =
+              int.tryParse(data['customer_count']?.toString() ?? '0') ?? 0;
+          _storeWalletTransactions =
+              (data['transactions'] as List<dynamic>?)?.map((tx) {
+                    final item = tx as Map<String, dynamic>;
+                    final rawAmount = double.tryParse(item['amount']?.toString() ?? '0') ?? 0.0;
+                    final methodStr = item['method']?.toString() ?? '';
+
+                    // If payment involved wallet credits, method contains 'Wallet Rs. <amount>'
+                    double walletPortion = 0.0;
+                    try {
+                      final m = RegExp(r'Wallet\s*Rs\.?\s*([0-9]+(?:\.[0-9]+)?)', caseSensitive: false).firstMatch(methodStr);
+                      if (m != null) walletPortion = double.tryParse(m.group(1) ?? '0') ?? 0.0;
+                    } catch (_) {
+                      walletPortion = 0.0;
+                    }
+
+                    // Adjust displayed amount for credits that include wallet usage
+                    double displayedAmount = rawAmount;
+                    if ((item['type'] ?? 'debit') == 'credit' && walletPortion > 0) {
+                      displayedAmount = (rawAmount - walletPortion).clamp(0.0, double.infinity);
+                    }
+
+                    return {
+                      'type': item['type'] ?? 'debit',
+                      'amount': displayedAmount,
+                      'raw_amount': rawAmount,
+                      'wallet_portion': walletPortion,
+                      'description': item['description'] ?? 'Transaction',
+                      'method': methodStr,
+                      'timestamp': item['timestamp'] ?? DateTime.now().toIso8601String(),
+                    };
+                  }).toList() ??
+                  [];
+        });
+      } else {
+        setState(() {
+          _storeWalletTotalBalance = 0.0;
+          _storeWalletCustomerCount = 0;
+          _storeWalletTransactions = [];
+        });
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(result['message'] ?? 'Unable to load transactions')),
+          );
+        }
+      }
+    } catch (e) {
+      setState(() {
+        _storeWalletTotalBalance = 0.0;
+        _storeWalletCustomerCount = 0;
+        _storeWalletTransactions = [];
+      });
+    }
+  }
+
   Future<void> _loadOrders() async {
     if (widget.userId == null) {
       setState(() {
@@ -645,15 +725,36 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
     try {
       final result = await ApiService.getSellerOrders(widget.userId!);
       if (result['success']) {
-        setState(() {
-          final List<Map<String, dynamic>> rawOrders =
-              List<Map<String, dynamic>>.from(result['data'] ?? []);
+        final List<Map<String, dynamic>> rawOrders =
+            List<Map<String, dynamic>>.from(result['data'] ?? []);
 
-          rawOrders.sort((a, b) {
-            final idA = int.tryParse(a['id'].toString()) ?? 0;
-            final idB = int.tryParse(b['id'].toString()) ?? 0;
-            return idB.compareTo(idA);
-          });
+        rawOrders.sort((a, b) {
+          final idA = int.tryParse(a['id'].toString()) ?? 0;
+          final idB = int.tryParse(b['id'].toString()) ?? 0;
+          return idB.compareTo(idA);
+        });
+
+        setState(() {
+          _orders = rawOrders;
+        });
+
+        // Enrich orders with payment details (wallet_amount, payment_method) by fetching order details
+        for (var o in rawOrders) {
+          try {
+            final id = int.tryParse(o['id']?.toString() ?? o['order_id']?.toString() ?? '') ?? 0;
+            if (id == 0) continue;
+            final detailsRes = await ApiService.getOrderDetails(id);
+            if (detailsRes['success'] && detailsRes['data'] != null) {
+              final od = detailsRes['data'] as Map<String, dynamic>;
+              // Attach known keys if present
+              if (od.containsKey('wallet_amount')) o['wallet_amount'] = od['wallet_amount'];
+              if (od.containsKey('payment_method')) o['payment_method'] = od['payment_method'];
+              if (od.containsKey('cash_amount')) o['cash_amount'] = od['cash_amount'];
+            }
+          } catch (_) {}
+        }
+        // Refresh state after enrichment
+        setState(() {
           _orders = rawOrders;
         });
       } else {
@@ -3684,6 +3785,8 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
         if (_promotionSubTab == 'active') return 'Active Promotions';
         if (_promotionSubTab == 'inactive') return 'Inactive Promotions';
         return 'Promotions';
+      case _transactionsTabIndex:
+        return 'Transactions';
       case _complaintsTabIndex:
         return 'Complaints';
       case _notificationsTabIndex:
@@ -3717,6 +3820,8 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
         }
       case 2:
         return _buildOrdersView();
+      case _transactionsTabIndex:
+        return _buildTransactionsView();
       case _complaintsTabIndex:
         return _buildComplaintsView();
       case 7:
@@ -3731,6 +3836,228 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
         return _buildSettingsView();
       default:
         return _buildDashboardView();
+    }
+  }
+
+  Widget _buildTransactionsView() {
+    return Scaffold(
+      backgroundColor: beigeBackground,
+      body: RefreshIndicator(
+        onRefresh: _loadStoreWalletData,
+        color: brownColor,
+        child: ListView(
+          padding: const EdgeInsets.all(24),
+          children: [
+            Container(
+              padding: const EdgeInsets.all(24),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(20),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.03),
+                    blurRadius: 12,
+                    offset: const Offset(0, 4),
+                  ),
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.05),
+                    blurRadius: 20,
+                    offset: const Offset(0, 8),
+                  ),
+                ],
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Store Wallet Summary',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  Wrap(
+                    spacing: 16,
+                    runSpacing: 16,
+                    children: [
+                      _buildStatCard('Customers with Balance',
+                          _storeWalletCustomerCount.toString(),
+                          Icons.people_outline, Colors.indigo),
+                      _buildStatCard('Total Store Credits',
+                          'Rs ${_storeWalletTotalBalance.toStringAsFixed(2)}',
+                          Icons.account_balance_wallet_outlined,
+                          Colors.teal),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 24),
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(20),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.04),
+                    blurRadius: 16,
+                    offset: const Offset(0, 8),
+                  ),
+                ],
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text(
+                        'Transaction History',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      Text(
+                        '${_storeWalletTransactions.length} transactions',
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Colors.grey,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  if (_storeWalletTransactions.isEmpty)
+                    SizedBox(
+                      height: 220,
+                      child: Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(
+                              Icons.history,
+                              size: 58,
+                              color: Colors.grey.shade400,
+                            ),
+                            const SizedBox(height: 12),
+                            const Text(
+                              'No transactions yet',
+                              style: TextStyle(
+                                color: Colors.grey,
+                                fontSize: 16,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    )
+                  else
+                    ListView.builder(
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      itemCount: _storeWalletTransactions.length,
+                      itemBuilder: (context, index) {
+                        return _buildTransactionCard(
+                            _storeWalletTransactions[index]);
+                      },
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTransactionCard(Map<String, dynamic> transaction) {
+    final type = transaction['type'] ?? 'debit';
+    final amount = transaction['amount'] ?? 0.0;
+    final description = transaction['description'] ?? 'Transaction';
+    final method = transaction['method'] ?? '';
+    final timestamp = transaction['timestamp'];
+    final isCredit = type == 'credit';
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade50,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: isCredit ? Colors.green.shade50 : Colors.red.shade50,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Icon(
+              isCredit ? Icons.add_circle_outline : Icons.remove_circle_outline,
+              color: isCredit ? Colors.green : Colors.red,
+              size: 22,
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  description,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w600,
+                    fontSize: 14,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                if (method.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    method,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Colors.blueGrey.shade700,
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 6),
+                Text(
+                  _formatTransactionDate(timestamp),
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: Colors.grey,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Text(
+            '${isCredit ? '+' : '-'}Rs. ${amount.toStringAsFixed(2)}',
+            style: TextStyle(
+              fontWeight: FontWeight.bold,
+              fontSize: 14,
+              color: isCredit ? Colors.green : Colors.red,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _formatTransactionDate(dynamic date) {
+    if (date == null) return 'N/A';
+    try {
+      final dt = DateTime.parse(date.toString());
+      return DateFormat('dd MMM yyyy, hh:mm a').format(dt);
+    } catch (_) {
+      return date.toString();
     }
   }
 
@@ -3904,7 +4231,7 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
       final status = (order['status'] ?? order['order_status'] ?? '')
           .toString()
           .toLowerCase();
-      return status == 'accepted';
+      return status == 'pending';
     }).length;
 
     final deliveredCount = _orders.where((order) {
@@ -3913,22 +4240,70 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
     }).length;
 
     double totalRevenue = 0.0;
+    final List<String> _revenueLog = [];
     for (var order in _orders) {
       final status = (order['status'] ?? order['order_status'] ?? '')
           .toString()
           .toLowerCase();
 
       if (status == 'completed') {
-        final total = order['total'];
-        if (total != null) {
-          if (total is num) {
-            totalRevenue += total.toDouble();
-          } else if (total is String) {
-            totalRevenue += double.tryParse(total) ?? 0.0;
+        // Parse seller's order total (displayed as "Your Order Price")
+        double orderTotalVal = 0.0;
+        final ot = order['total'];
+        if (ot != null) {
+          if (ot is num) {
+            orderTotalVal = ot.toDouble();
+          } else if (ot is String) {
+            orderTotalVal = double.tryParse(ot) ?? 0.0;
           }
         }
+
+        final paymentMethod = (order['payment_method'] ?? order['payment_type'] ?? '')
+            .toString()
+            .toLowerCase();
+
+        final double walletUsed = double.tryParse(order['wallet_amount']?.toString() ?? '0') ?? 0.0;
+
+        double contribution = 0.0;
+        if (paymentMethod.contains('cash') || paymentMethod.contains('cod')) {
+          contribution = orderTotalVal;
+        } else if (paymentMethod.contains('wallet')) {
+          contribution = (orderTotalVal - walletUsed);
+        } else {
+          contribution = orderTotalVal;
+        }
+        totalRevenue += contribution;
+        _revenueLog.add('Order ${order['id'] ?? order['order_id'] ?? '-'}: status=$status, payment_method=$paymentMethod, order_total=$orderTotalVal, wallet_used=$walletUsed, contribution= $contribution');
       }
     }
+
+    // Subtract refund amounts for completed complaints
+    for (var complaint in _complaints) {
+      final cStatus = (complaint['status'] ?? '').toString().toLowerCase();
+      if (cStatus == 'completed') {
+        final refund = complaint['refund_amount'];
+        double refundVal = 0.0;
+        if (refund != null) {
+          if (refund is num) {
+            refundVal = refund.toDouble();
+          } else if (refund is String) {
+            refundVal = double.tryParse(refund) ?? 0.0;
+          }
+        }
+        totalRevenue -= refundVal;
+        _revenueLog.add('Complaint ${complaint['complaint_id'] ?? '-'}: status=$cStatus, refund=$refundVal (subtracted)');
+      }
+    }
+
+    // Print detailed breakdown to console for debugging
+    try {
+      print('--- Revenue Breakdown ---');
+      for (var line in _revenueLog) {
+        print(line);
+      }
+      print('Total Revenue (computed): $totalRevenue');
+      print('--- End Revenue Breakdown ---');
+    } catch (_) {}
 
     final query = _searchController.text.toLowerCase();
     final filteredRecentOrders = _orders.where((order) {
@@ -3970,7 +4345,7 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
                     Colors.blue,
                   ),
                   _buildStatCard(
-                    'Total Orders',
+                    'New Orders',
                     ordersCount.toString(),
                     Icons.shopping_bag_outlined,
                     Colors.orange,
@@ -4054,9 +4429,14 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
     return Container(
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        color: whiteColor,
+        color: Colors.white,
         borderRadius: BorderRadius.circular(16),
         boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.03),
+            blurRadius: 10,
+            offset: const Offset(0, 2),
+          ),
           BoxShadow(
             color: Colors.black.withOpacity(0.05),
             blurRadius: 10,
@@ -5369,12 +5749,10 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
       final description = (complaint['description'] ?? '')
           .toString()
           .toLowerCase();
-      final type = (complaint['type'] ?? '').toString().toLowerCase();
       return customerName.contains(query) ||
           productName.contains(query) ||
           issue.contains(query) ||
-          description.contains(query) ||
-          type.contains(query);
+          description.contains(query);
     }).toList();
 
     final filteredComplaints =
@@ -5518,7 +5896,6 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
                                     DataColumn(label: Text('Product ID')),
                                     DataColumn(label: Text('Store ID')),
                                     DataColumn(label: Text('User ID')),
-                                    DataColumn(label: Text('Type')),
                                     DataColumn(label: Text('Issue')),
                                     DataColumn(label: Text('Description')),
                                     DataColumn(label: Text('Status')),
@@ -5556,7 +5933,6 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
                                         complaint['store_id'] ?? 'N/A';
                                     final userId =
                                         complaint['user_id'] ?? 'N/A';
-                                    final type = complaint['type'] ?? 'N/A';
                                     final description =
                                         complaint['description'] ??
                                         'No description provided';
@@ -5615,12 +5991,6 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
                                         DataCell(
                                           Text(
                                             userId.toString(),
-                                            overflow: TextOverflow.ellipsis,
-                                          ),
-                                        ),
-                                        DataCell(
-                                          Text(
-                                            type.toString(),
                                             overflow: TextOverflow.ellipsis,
                                           ),
                                         ),
@@ -6210,6 +6580,7 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
                                   },
                                   backgroundColor: beigeBackground,
                                   selectedColor: brownColor,
+                                  showCheckmark: false,
                                   labelStyle: TextStyle(
                                     color: _promotionCategoryFilter == 'all'
                                         ? whiteColor
@@ -6244,6 +6615,7 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
                                       },
                                       backgroundColor: beigeBackground,
                                       selectedColor: brownColor,
+                                      showCheckmark: false,
                                       labelStyle: TextStyle(
                                         color:
                                             _promotionCategoryFilter
@@ -6374,6 +6746,7 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
                                 ),
                               ),
                               activeColor: brownColor,
+                              checkColor: whiteColor,
                               contentPadding: EdgeInsets.zero,
                             );
                           },
@@ -6460,6 +6833,7 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
                                 ),
                               ),
                               activeColor: brownColor,
+                              checkColor: whiteColor,
                               contentPadding: EdgeInsets.zero,
                             );
                           },
@@ -6922,6 +7296,162 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
               style: TextStyle(fontSize: isMobile ? 12 : 13, color: lightGray),
             ),
             const SizedBox(height: 16),
+            // Promotion product filters: Select All + category chips (same as Create)
+            Builder(
+              builder: (context) {
+                final categories = activeProducts
+                    .map((p) => (p['category'] ?? 'Uncategorized').toString())
+                    .toSet()
+                    .toList();
+                categories.sort();
+                final filteredProducts = activeProducts.where((p) {
+                  if (_promotionCategoryFilter == 'all') return true;
+                  final cat = (p['category'] ?? 'Uncategorized').toString();
+                  return cat.toLowerCase() ==
+                      _promotionCategoryFilter.toLowerCase();
+                }).toList();
+
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        ElevatedButton(
+                          onPressed: () {
+                            setState(() {
+                              _productsError = null;
+                              final ids = filteredProducts
+                                  .map((p) => p['product_id'] ?? 0)
+                                  .whereType<int>()
+                                  .toList();
+                              final allSelected = ids.every(
+                                (id) => _selectedProductIds.contains(id),
+                              );
+                              if (allSelected) {
+                                // deselect filtered
+                                _selectedProductIds.removeWhere(
+                                  (id) => ids.contains(id),
+                                );
+                              } else {
+                                // select all filtered
+                                for (final id in ids) {
+                                  if (!_selectedProductIds.contains(id))
+                                    _selectedProductIds.add(id);
+                                }
+                              }
+                            });
+                          },
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: beigeBackground,
+                            foregroundColor: darkText,
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 6,
+                            ),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            elevation: 0,
+                            side: BorderSide.none,
+                          ),
+                          child: Text(
+                            'Select All',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: darkText,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: SingleChildScrollView(
+                            scrollDirection: Axis.horizontal,
+                            child: Row(
+                              children: [
+                                ChoiceChip(
+                                  label: const Text('All'),
+                                  selected: _promotionCategoryFilter == 'all',
+                                  onSelected: (_) {
+                                    setState(
+                                      () => _promotionCategoryFilter = 'all',
+                                    );
+                                  },
+                                  backgroundColor: beigeBackground,
+                                  selectedColor: brownColor,
+                                  showCheckmark: false,
+                                  labelStyle: TextStyle(
+                                    color: _promotionCategoryFilter == 'all'
+                                        ? whiteColor
+                                        : darkText,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 4,
+                                  ),
+                                  pressElevation: 0,
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  side: BorderSide(color: Colors.transparent),
+                                ),
+                                const SizedBox(width: 8),
+                                ...categories.map(
+                                  (cat) => Padding(
+                                    padding: const EdgeInsets.only(right: 8.0),
+                                    child: ChoiceChip(
+                                      label: Text(cat),
+                                      selected:
+                                          _promotionCategoryFilter
+                                              .toLowerCase() ==
+                                          cat.toLowerCase(),
+                                      onSelected: (_) {
+                                        setState(
+                                          () => _promotionCategoryFilter = cat,
+                                        );
+                                      },
+                                      backgroundColor: beigeBackground,
+                                      selectedColor: brownColor,
+                                      showCheckmark: false,
+                                      labelStyle: TextStyle(
+                                        color:
+                                            _promotionCategoryFilter
+                                                    .toLowerCase() ==
+                                                cat.toLowerCase()
+                                            ? whiteColor
+                                            : darkText,
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 10,
+                                        vertical: 4,
+                                      ),
+                                      pressElevation: 0,
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
+                                      side: BorderSide(
+                                        color: Colors.transparent,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    // pass filteredProducts down via context using a closure variable
+                    SizedBox(width: 0, height: 0),
+                  ],
+                );
+              },
+            ),
             if (_productsError != null) ...[
               Text(
                 _productsError!,
@@ -7007,6 +7537,7 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
                               ),
                             ),
                             activeColor: brownColor,
+                            checkColor: whiteColor,
                             contentPadding: EdgeInsets.zero,
                           );
                         },
@@ -7084,6 +7615,7 @@ class _SellerDashboardScreenState extends State<SellerDashboardScreen>
                               ),
                             ),
                             activeColor: brownColor,
+                            checkColor: whiteColor,
                             contentPadding: EdgeInsets.zero,
                           );
                         },

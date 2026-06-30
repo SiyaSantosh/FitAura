@@ -18,6 +18,7 @@ class MyOrdersScreen extends StatefulWidget {
 class _MyOrdersScreenState extends State<MyOrdersScreen> with SingleTickerProviderStateMixin {
   late TabController _tabController;
   List<Map<String, dynamic>> _orders = [];
+  Set<int> _complainedProductIds = {};
   bool _isLoading = true;
 
   @override
@@ -25,6 +26,7 @@ class _MyOrdersScreenState extends State<MyOrdersScreen> with SingleTickerProvid
     super.initState();
     _tabController = TabController(length: 2, vsync: this);
     _loadOrders();
+    _loadCustomerComplaints();
   }
 
   @override
@@ -42,11 +44,56 @@ class _MyOrdersScreenState extends State<MyOrdersScreen> with SingleTickerProvid
           _orders = List<Map<String, dynamic>>.from(res['data']);
           _isLoading = false;
         });
+        await _loadCustomerComplaints();
       } else {
         setState(() => _isLoading = false);
       }
     } catch (e) {
       setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _loadCustomerComplaints() async {
+    try {
+      final res = await ApiService.getCustomerComplaints(widget.userId);
+      if (res['success']) {
+        final complaints = List<Map<String, dynamic>>.from(res['data'] ?? []);
+        final productIds = <int>{};
+
+        for (final complaint in complaints) {
+          final pid = complaint['product_id'];
+          if (pid == null) continue;
+          final parsedProductId = pid is int ? pid : int.tryParse(pid.toString());
+          if (parsedProductId != null) {
+            productIds.add(parsedProductId);
+          }
+        }
+
+        setState(() {
+          _complainedProductIds = productIds;
+        });
+      }
+    } catch (_) {
+      // Ignore loading failures here; complaint button will remain enabled unless disabled by other rules.
+    }
+  }
+
+  bool _hasComplaintForProduct(dynamic productId) {
+    if (productId == null) return false;
+    final parsedProductId = productId is int ? productId : int.tryParse(productId.toString());
+    return parsedProductId != null && _complainedProductIds.contains(parsedProductId);
+  }
+
+  bool _isComplaintWindowOpen(dynamic dateValue) {
+    if (dateValue == null) return false;
+    try {
+      final orderDate = DateTime.tryParse(dateValue.toString());
+      if (orderDate == null) return false;
+      final now = DateTime.now();
+      final diff = now.difference(orderDate);
+      return !diff.isNegative && diff <= const Duration(days: 7);
+    } catch (_) {
+      return false;
     }
   }
 
@@ -273,7 +320,7 @@ SizedBox(height: 16),
                   const SizedBox(height: 24),
                   const Text('Items', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                   const SizedBox(height: 12),
-                  ...items.map((item) => _buildItemRow(item, data['order_status'] ?? 'pending', orderId)),
+                  ...items.map((item) => _buildItemRow(item, data['order_status'] ?? 'pending', orderId, data['created_at'])),
                   const SizedBox(height: 24),
                   const Divider(),
                   const SizedBox(height: 24),
@@ -303,8 +350,12 @@ SizedBox(height: 16),
     );
   }
 
-  Widget _buildItemRow(Map<String, dynamic> item, String orderStatus, int orderId) {
+  Widget _buildItemRow(Map<String, dynamic> item, String orderStatus, int orderId, dynamic orderDate) {
     bool isCompleted = orderStatus.toLowerCase() == 'completed';
+    final productId = item['product_id'];
+    final bool complaintExists = _hasComplaintForProduct(productId);
+    final bool withinWindow = _isComplaintWindowOpen(orderDate);
+    final bool canFileComplaint = isCompleted && withinWindow && !complaintExists;
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 16),
@@ -370,19 +421,32 @@ SizedBox(height: 16),
                 ),
                 const SizedBox(width: 8),
                 TextButton.icon(
-                  onPressed: () => _showComplaintDialog(
-                    orderId: orderId,
-                    productId: item['product_id'],
-                    storeId: item['store_id'] ?? 0,
-                    productName: item['product_name'] ?? 'Product',
+                  onPressed: canFileComplaint
+                      ? () => _showComplaintDialog(
+                            orderId: orderId,
+                            productId: item['product_id'],
+                            storeId: item['store_id'] ?? 0,
+                            productName: item['product_name'] ?? 'Product',
+                          )
+                      : null,
+                  icon: Icon(
+                    Icons.report_problem_outlined,
+                    size: 16,
+                    color: canFileComplaint ? Colors.red : Colors.grey,
                   ),
-                  icon: const Icon(Icons.report_problem_outlined, size: 16, color: Colors.red),
-                  label: const Text('Complaint', style: TextStyle(color: Colors.red, fontSize: 12, fontWeight: FontWeight.bold)),
+                  label: Text(
+                    'Complaint',
+                    style: TextStyle(
+                      color: canFileComplaint ? Colors.red : Colors.grey,
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
                   style: TextButton.styleFrom(
                     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                     shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(8),
-                      side: const BorderSide(color: Colors.red, width: 0.5),
+                      side: BorderSide(color: canFileComplaint ? Colors.red : Colors.grey, width: 0.5),
                     ),
                   ),
                 ),
@@ -400,7 +464,6 @@ SizedBox(height: 16),
     required int storeId,
     required String productName,
   }) {
-    String selectedType = 'return';
     String selectedIssue = 'Torn';
     final descController = TextEditingController();
     final List<File> pickedImages = [];
@@ -471,67 +534,6 @@ SizedBox(height: 16),
                 const Divider(height: 1),
                 const SizedBox(height: 24),
                 const Text(
-                  'Request Type',
-                  style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16, color: HelpCenterStyles.darkTextColor),
-                ),
-                const SizedBox(height: 10),
-                Row(
-                  children: [
-                    Expanded(
-                      child: GestureDetector(
-                        onTap: () => setSheetState(() => selectedType = 'return'),
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 200),
-                          padding: const EdgeInsets.symmetric(vertical: 14),
-                          decoration: BoxDecoration(
-                            color: selectedType == 'return' ? HelpCenterStyles.primaryColor : Colors.transparent,
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(
-                              color: selectedType == 'return' ? HelpCenterStyles.primaryColor : Colors.grey.shade300,
-                            ),
-                          ),
-                          child: Center(
-                            child: Text(
-                              'Return',
-                              style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                color: selectedType == 'return' ? Colors.white : Colors.grey.shade600,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: GestureDetector(
-                        onTap: () => setSheetState(() => selectedType = 'exchange'),
-                        child: AnimatedContainer(
-                          duration: const Duration(milliseconds: 200),
-                          padding: const EdgeInsets.symmetric(vertical: 14),
-                          decoration: BoxDecoration(
-                            color: selectedType == 'exchange' ? HelpCenterStyles.primaryColor : Colors.transparent,
-                            borderRadius: BorderRadius.circular(10),
-                            border: Border.all(
-                              color: selectedType == 'exchange' ? HelpCenterStyles.primaryColor : Colors.grey.shade300,
-                            ),
-                          ),
-                          child: Center(
-                            child: Text(
-                              'Exchange',
-                              style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                color: selectedType == 'exchange' ? Colors.white : Colors.grey.shade600,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 24),
-                const Text(
                   'Issue Type',
                   style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16, color: HelpCenterStyles.darkTextColor),
                 ),
@@ -594,7 +596,7 @@ SizedBox(height: 16),
                   ),
                 const SizedBox(height: 24),
                 const Text(
-                  'Upload Photos (Optional, max 3)',
+                  'Upload Photos (Max 3)',
                   style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 16, color: HelpCenterStyles.darkTextColor),
                 ),
                 const SizedBox(height: 10),
@@ -701,7 +703,6 @@ SizedBox(height: 16),
                         productId: productId,
                         storeId: storeId,
                         userId: widget.userId,
-                        type: selectedType,
                         issue: selectedIssue,
                         description: desc,
                         images: b64Images,
@@ -721,6 +722,7 @@ SizedBox(height: 16),
                               userId: widget.userId,
                             );
                           }
+                          await _loadCustomerComplaints();
                           Navigator.pop(ctx);
                         } else {
                         ScaffoldMessenger.of(context).showSnackBar(

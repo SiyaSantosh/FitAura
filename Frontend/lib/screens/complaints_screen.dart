@@ -323,7 +323,6 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> with SingleTickerPr
   void _showComplaintDetails(Map<String, dynamic> complaint) {
     final complaintId = complaint['complaint_id'];
     final orderId = complaint['order_id'];
-    final type = complaint['type'] ?? 'return';
     final issue = complaint['issue'] ?? 'torn';
     final desc = complaint['description'] ?? '';
     final productName = complaint['product_name'] ?? 'Product';
@@ -484,31 +483,20 @@ class _ComplaintsScreenState extends State<ComplaintsScreen> with SingleTickerPr
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Type',
-                              style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
-                            ),
-                            Text(
-                              type.toUpperCase(),
-                              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
-                            ),
-                          ],
-                        ),
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Issue',
-                              style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
-                            ),
-                            Text(
-                              issue,
-                              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
-                            ),
-                          ],
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Issue',
+                                style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                              ),
+                              Text(
+                                issue,
+                                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                              ),
+                            ],
+                          ),
                         ),
                         Column(
                           crossAxisAlignment: CrossAxisAlignment.start,

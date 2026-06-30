@@ -1394,7 +1394,6 @@ class ApiService {
     required int productId,
     required int storeId,
     required int userId,
-    required String type,
     required String issue,
     required String description,
     required List<String> images,
@@ -1405,7 +1404,6 @@ class ApiService {
         'product_id': productId,
         'store_id': storeId,
         'user_id': userId,
-        'type': type,
         'issue': issue,
         'description': description,
         'images': images,
@@ -1492,6 +1490,26 @@ class ApiService {
       return {
         'success': false,
         'message': _error(res, 'Failed to fetch wallet data'),
+      };
+    } catch (e) {
+      return {'success': false, 'message': e.toString()};
+    }
+  }
+
+  /// Gets wallet data for a seller's store.
+  static Future<Map<String, dynamic>> getStoreWalletData(int userId) async {
+    try {
+      final res = await http.get(
+        Uri.parse('$baseUrl/api/wallets/store/$userId'),
+        headers: _headers,
+      );
+      if (_isOk(res.statusCode)) {
+        final data = jsonDecode(res.body);
+        return {'success': true, 'data': data['data']};
+      }
+      return {
+        'success': false,
+        'message': _error(res, 'Failed to fetch store wallet data'),
       };
     } catch (e) {
       return {'success': false, 'message': e.toString()};
